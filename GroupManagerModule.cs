@@ -1392,6 +1392,8 @@ public class GroupManagerModule(
             string[] essenceActions = new[] { "get_essence_msg_list", "get_group_essence_msg_list" };
             Exception lastError = new Exception("接口调用失败");
             bool called = false;
+            string usedAction = "";
+            string rawResponse = "";
             foreach (string essenceAction in essenceActions)
             {
                 try
@@ -1399,6 +1401,8 @@ public class GroupManagerModule(
                     string response = await CallActionAsync(essenceAction, parameters);
                     items = ParseActionResponse(response, "获取精华列表");
                     called = true;
+                    usedAction = essenceAction;
+                    rawResponse = response;
                     break;
                 }
                 catch (Exception attemptError)
@@ -1413,6 +1417,12 @@ public class GroupManagerModule(
             List<JsonElement> allItems = items.ValueKind == JsonValueKind.Array
                 ? items.EnumerateArray().ToList()
                 : new List<JsonElement>();
+            if (allItems.Count == 0)
+            {
+                // 空列表时打印原始返回，便于定位协议端返回结构与预期不符的情况
+                logger.LogInformation("[群管] 精华列表为空（动作 {Action}），原始返回: {Raw}",
+                    usedAction, rawResponse.Length > 500 ? rawResponse[..500] : rawResponse);
+            }
             if (allItems.Count == 0)
             {
                 interactor.Poke("📋 本群暂无精华消息");
