@@ -1283,8 +1283,27 @@ public class GroupManagerModule(
                 ["group_id"] = groupId,
                 ["notice_id"] = noticeId
             };
-            string response = await CallActionAsync("_del_group_notice", parameters);
-            ParseActionResponse(response, "删除群公告");
+            // NapCat 用 _del_group_notice，LLOneBot 用 _delete_group_notice，参数相同动作名不同，依次尝试
+            Exception lastError = new Exception("接口调用失败");
+            bool called = false;
+            foreach (string deleteAction in new[] { "_del_group_notice", "_delete_group_notice" })
+            {
+                try
+                {
+                    string response = await CallActionAsync(deleteAction, parameters);
+                    ParseActionResponse(response, "删除群公告");
+                    called = true;
+                    break;
+                }
+                catch (Exception attemptError)
+                {
+                    lastError = attemptError;
+                }
+            }
+            if (called == false)
+            {
+                throw lastError;
+            }
             LogOperation("删除群公告", operatorId ?? "system", "", "成功, notice_id: " + noticeId);
             interactor.Poke("✅ 已删除群公告 (ID: " + noticeId + ")");
         }
