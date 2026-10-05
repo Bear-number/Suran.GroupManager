@@ -298,16 +298,29 @@ public class GroupManagerModule(
         {
             return;
         }
+        string noticeKind = noticeType.GetString() ?? "";
+        if (noticeKind != "group_increase" && noticeKind != "group_decrease")
+        {
+            return;
+        }
 
+        // 事件必须在独立任务中处理：处理过程会调用 CallActionAsync 等待 echo 响应，
+        // 而响应要靠本接收循环分发，若在循环内同步处理会自己等自己造成死锁
+        JsonElement noticeData = messageElement.Clone();
+        _ = Task.Run(() => HandleNoticeEventAsync(noticeKind, noticeData));
+    }
+
+    async Task HandleNoticeEventAsync(string noticeKind, JsonElement notice)
+    {
         try
         {
-            if (noticeType.GetString() == "group_increase")
+            if (noticeKind == "group_increase")
             {
-                await HandleGroupIncreaseAsync(messageElement);
+                await HandleGroupIncreaseAsync(notice);
             }
-            else if (noticeType.GetString() == "group_decrease")
+            else
             {
-                await HandleGroupDecreaseAsync(messageElement);
+                await HandleGroupDecreaseAsync(notice);
             }
         }
         catch (Exception eventError)
@@ -379,7 +392,12 @@ public class GroupManagerModule(
         {
             string detail = root.TryGetProperty("message", out JsonElement messageElement) && messageElement.ValueKind == JsonValueKind.String
                 ? messageElement.GetString() ?? ""
-                : (root.TryGetProperty("wording", out JsonElement wordingElement) ? wordingElement.GetRawText() : "未知错误");
+                : "未知错误";
+            // 常见协议端错误码翻译：1404 = 接口存在但协议端未开启/未实现
+            if (retcode == 1404)
+            {
+                detail += "（协议端未开放该接口，请检查协议端设置或更换支持的协议端）";
+            }
             throw new Exception(operationName + "失败：" + detail + "（retcode " + retcode + "）");
         }
         return root.TryGetProperty("data", out JsonElement dataElement) ? dataElement.Clone() : JsonDocument.Parse("null").RootElement.Clone();
@@ -452,7 +470,7 @@ public class GroupManagerModule(
         {
             return;
         }
-        string nickname = await LookupNicknameAsync(userId);
+        string nickname = await LookupNicknameAsync(groupId, userId);
         string display = nickname.Length > 0 ? nickname + "(" + userId + ")" : userId.ToString();
 
         if (Configuration.EnableWelcome)
@@ -489,16 +507,16 @@ public class GroupManagerModule(
             ? subElement.GetString() ?? ""
             : "";
 
-        string userDisplay = await FormatUserDisplayAsync(userId);
+        string userDisplay = await FormatUserDisplayAsync(groupId, userId);
         string text;
         if (subType == "kick_me")
         {
-            string operatorDisplay = await FormatUserDisplayAsync(operatorId);
+            string operatorDisplay = await FormatUserDisplayAsync(groupId, operatorId);
             text = "⚠️ 你被管理员 " + operatorDisplay + " 踢出了群 " + groupId;
         }
         else if (subType == "kick")
         {
-            string operatorDisplay = await FormatUserDisplayAsync(operatorId);
+            string operatorDisplay = await FormatUserDisplayAsync(groupId, operatorId);
             text = "成员 " + userDisplay + " 被 " + operatorDisplay + " 踢出了群聊";
         }
         else
@@ -509,24 +527,49 @@ public class GroupManagerModule(
         LogOperation("退群感知", "system", userId.ToString(), text);
     }
 
-    async Task<string> FormatUserDisplayAsync(long userId)
+    async Task<string> FormatUserDisplayAsync(long groupId, long userId)
     {
         if (userId == 0)
         {
             return "未知用户";
         }
-        string nickname = await LookupNicknameAsync(userId);
+        string nickname = await LookupNicknameAsync(groupId, userId);
         return nickname.Length > 0 ? nickname + "(" + userId + ")" : userId.ToString();
     }
 
-    async Task<string> LookupNicknameAsync(long userId)
+    // 昵称查询双通道：get_stranger_info 失败时转 get_group_member_info（部分协议端不开放前者）
+    async Task<string> LookupNicknameAsync(long groupId, long userId)
     {
         try
         {
-            JsonObject parameters = new() { ["user_id"] = userId };
-            string response = await CallActionAsync("get_stranger_info", parameters);
-            JsonElement data = ParseActionResponse(response, "查询用户信息");
-            return GetStringField(data, "nickname");
+            JsonObject strangerParameters = new() { ["user_id"] = userId };
+            string strangerResponse = await CallActionAsync("get_stranger_info", strangerParameters);
+            JsonElement strangerData = ParseActionResponse(strangerResponse, "查询用户信息");
+            string nickname = GetStringField(strangerData, "nickname");
+            if (nickname.Length > 0)
+            {
+                return nickname;
+            }
+        }
+        catch
+        {
+            // 转用群成员信息查询
+        }
+        try
+        {
+            JsonObject memberParameters = new()
+            {
+                ["group_id"] = groupId,
+                ["user_id"] = userId
+            };
+            string memberResponse = await CallActionAsync("get_group_member_info", memberParameters);
+            JsonElement memberData = ParseActionResponse(memberResponse, "查询群成员信息");
+            string card = GetStringField(memberData, "card");
+            if (card.Length > 0)
+            {
+                return card;
+            }
+            return GetStringField(memberData, "nickname");
         }
         catch
         {
@@ -1325,9 +1368,32 @@ public class GroupManagerModule(
         try
         {
             JsonObject parameters = new() { ["group_id"] = groupId };
-            string response = await CallActionAsync("get_essence_msg_list", parameters);
-            JsonElement items = ParseActionResponse(response, "获取精华列表");
-            List<JsonElement> allItems = items.EnumerateArray().ToList();
+            // NapCat 用 get_essence_msg_list，LLOneBot 系用 get_group_essence_msg_list，依次尝试
+            JsonElement items = JsonDocument.Parse("null").RootElement.Clone();
+            string[] essenceActions = new[] { "get_essence_msg_list", "get_group_essence_msg_list" };
+            Exception lastError = new Exception("接口调用失败");
+            bool called = false;
+            foreach (string essenceAction in essenceActions)
+            {
+                try
+                {
+                    string response = await CallActionAsync(essenceAction, parameters);
+                    items = ParseActionResponse(response, "获取精华列表");
+                    called = true;
+                    break;
+                }
+                catch (Exception attemptError)
+                {
+                    lastError = attemptError;
+                }
+            }
+            if (called == false)
+            {
+                throw lastError;
+            }
+            List<JsonElement> allItems = items.ValueKind == JsonValueKind.Array
+                ? items.EnumerateArray().ToList()
+                : new List<JsonElement>();
             if (allItems.Count == 0)
             {
                 interactor.Poke("📋 本群暂无精华消息");
