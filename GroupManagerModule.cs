@@ -351,10 +351,12 @@ public class GroupManagerModule(
                 connectionReady.TrySetResult(true);
             }
 
+            // 参数对象可能被多次复用（双动作重试等），必须深拷贝后再挂到请求包，
+            // 否则第二次挂载会抛 "The node already has a parent"
             JsonObject payload = new()
             {
                 ["action"] = action,
-                ["params"] = parameters,
+                ["params"] = parameters.DeepClone(),
                 ["echo"] = echo
             };
             byte[] payloadBytes = Encoding.UTF8.GetBytes(payload.ToJsonString());
