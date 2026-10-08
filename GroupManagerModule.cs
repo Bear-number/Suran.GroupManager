@@ -1433,13 +1433,28 @@ public class GroupManagerModule(
             List<string> lines = new() { "📋 群精华消息（共 " + allItems.Count + " 条）：" };
             foreach (JsonElement item in allItems.Take(Math.Max(1, count)))
             {
+                string messageId = GetStringField(item, "message_id");
                 string sender = GetStringField(item, "sender_nick");
                 if (sender.Length == 0)
                 {
                     sender = GetStringField(item, "sender_id");
                 }
-                lines.Add("- [" + FormatTimestamp(GetNumericField(item, "sender_time")) + "] " + sender + ": "
-                    + ExtractEssenceText(item));
+                // 时间兜底：无 sender_time 时用 operator_time，再无则按 message_id 反查原消息时间
+                long messageTime = GetNumericField(item, "sender_time");
+                string operatorText = "";
+                string essenceOperator = GetStringField(item, "operator_uin");
+                if (essenceOperator.Length == 0)
+                {
+                    essenceOperator = GetStringField(item, "operator_id");
+                }
+                if (essenceOperator.Length > 0)
+                {
+                    operatorText = "，设置人 " + essenceOperator;
+                }
+                (string content, long resolvedTime) = await ExtractEssenceContentAsync(item, messageId, messageTime);
+                messageTime = resolvedTime;
+                string idLabel = messageId.Length > 0 ? "id " + messageId : "无 message_id（该协议端不支持取消精华）";
+                lines.Add("- [" + FormatTimestamp(messageTime) + "] " + sender + ": " + content + "\n  " + idLabel + operatorText);
             }
             if (allItems.Count > Math.Max(1, count))
             {
@@ -1636,33 +1651,178 @@ public class GroupManagerModule(
         return display;
     }
 
-    // 精华消息content兼容两种格式：纯字符串 或 段数组[{type:text,data:{text}}]
-    static string ExtractEssenceText(JsonElement item)
+    // 精华正文提取（对齐上游 v1.2.4）：兼容 NapCat/新版SnowLuma 的 content 段数组（非文本段渲染占位符）、
+    // content 纯字符串、旧版 SnowLuma 的 msg_content 透传格式（msg_type 1=文本/2=表情/3=图片/4=文件）、
+    // LLOneBot 无 content 时按 message_id 用 get_msg 反查正文（单条失败不影响整列表）；
+    // 全部拿不到时诚实返回 [内容不可用]。
+    async Task<(string Content, long Time)> ExtractEssenceContentAsync(JsonElement item, string messageId, long messageTime)
     {
-        string content = "";
+        // 1) content 为纯字符串
         if (item.TryGetProperty("content", out JsonElement contentElement))
         {
             if (contentElement.ValueKind == JsonValueKind.String)
             {
-                content = contentElement.GetString() ?? "";
+                string direct = (contentElement.GetString() ?? "").Trim();
+                if (direct.Length > 0)
+                {
+                    return (TruncateEssence(direct), messageTime);
+                }
             }
             else if (contentElement.ValueKind == JsonValueKind.Array)
             {
-                StringBuilder textBuilder = new();
-                foreach (JsonElement segment in contentElement.EnumerateArray())
+                string built = ExtractSegmentText(contentElement).Trim();
+                if (built.Length > 0)
                 {
-                    if (segment.ValueKind == JsonValueKind.Object
-                        && GetStringField(segment, "type") == "text"
-                        && segment.TryGetProperty("data", out JsonElement segmentData)
-                        && segmentData.ValueKind == JsonValueKind.Object)
-                    {
-                        textBuilder.Append(GetStringField(segmentData, "text"));
-                    }
+                    return (TruncateEssence(built), messageTime);
                 }
-                content = textBuilder.ToString();
             }
         }
-        content = content.Trim();
+
+        // 2) 旧版 SnowLuma：msg_content 透传 QQ web 原始格式
+        if (item.TryGetProperty("msg_content", out JsonElement msgContent))
+        {
+            string webContent = ExtractWebEssenceContent(msgContent).Trim();
+            if (webContent.Length > 0)
+            {
+                return (TruncateEssence(webContent), messageTime);
+            }
+        }
+
+        // 3) LLOneBot：只返回元数据无 content，按 message_id 用 get_msg 反查正文（单条失败不影响整列表）
+        if (messageId.Length > 0)
+        {
+            try
+            {
+                JsonObject lookupParameters = new() { ["message_id"] = messageId };
+                string response = await CallActionAsync("get_msg", lookupParameters);
+                JsonElement data = ParseActionResponse(response, "获取消息");
+                JsonElement message = data.TryGetProperty("message", out JsonElement messageElement)
+                    ? messageElement.Clone()
+                    : JsonDocument.Parse("[]").RootElement.Clone();
+                string lookedUp = ExtractSegmentText(message).Trim();
+                if (lookedUp.Length > 0)
+                {
+                    // 顺带兜底时间：LLOneBot 精华条目常无 sender_time，get_msg 的时间更可靠
+                    if (messageTime <= 0)
+                    {
+                        long lookedTime = GetNumericField(data, "time");
+                        if (lookedTime > 0)
+                        {
+                            messageTime = lookedTime;
+                        }
+                    }
+                    return (TruncateEssence(lookedUp), messageTime);
+                }
+            }
+            catch
+            {
+                // 单条反查失败不影响整列表
+            }
+        }
+
+        // 兜底时间：operator_time
+        if (messageTime <= 0)
+        {
+            long operatorTime = GetNumericField(item, "operator_time");
+            if (operatorTime > 0)
+            {
+                messageTime = operatorTime;
+            }
+        }
+        return ("[内容不可用]", messageTime);
+    }
+
+    // OneBot 段数组 → 正文（非文本段渲染为占位符，不再静默丢弃）
+    static string ExtractSegmentText(JsonElement message)
+    {
+        StringBuilder builder = new();
+        if (message.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement segment in message.EnumerateArray())
+            {
+                if (segment.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+                string segmentType = GetStringField(segment, "type");
+                if (segmentType == "text")
+                {
+                    if (segment.TryGetProperty("data", out JsonElement segmentData) && segmentData.ValueKind == JsonValueKind.Object)
+                    {
+                        builder.Append(GetStringField(segmentData, "text"));
+                    }
+                }
+                else if (segmentType is "image" or "flash")
+                {
+                    builder.Append("[图片]");
+                }
+                else if (segmentType is "face" or "mface")
+                {
+                    builder.Append("[表情]");
+                }
+                else if (segmentType == "record")
+                {
+                    builder.Append("[语音]");
+                }
+                else if (segmentType == "video")
+                {
+                    builder.Append("[视频]");
+                }
+                else if (segmentType is "json" or "xml")
+                {
+                    builder.Append("[卡片]");
+                }
+                else if (segmentType.Length > 0)
+                {
+                    builder.Append("[").Append(segmentType).Append("]");
+                }
+            }
+        }
+        return builder.ToString();
+    }
+
+    // 旧版 SnowLuma 透传的 QQ web 原始精华格式：msg_type 1=文本/2=表情/3=图片/4=文件
+    static string ExtractWebEssenceContent(JsonElement msgContent)
+    {
+        StringBuilder builder = new();
+        if (msgContent.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement segment in msgContent.EnumerateArray())
+            {
+                if (segment.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+                long msgType = GetNumericField(segment, "msg_type");
+                string text = GetStringField(segment, "text");
+                builder.Append(msgType switch
+                {
+                    1 => text,
+                    2 => "[表情]",
+                    3 => "[图片]",
+                    4 => "[文件]",
+                    _ => ""
+                });
+            }
+        }
+        else if (msgContent.ValueKind == JsonValueKind.Object)
+        {
+            long msgType = GetNumericField(msgContent, "msg_type");
+            string text = GetStringField(msgContent, "text");
+            builder.Append(msgType switch
+            {
+                1 => text,
+                2 => "[表情]",
+                3 => "[图片]",
+                4 => "[文件]",
+                _ => ""
+            });
+        }
+        return builder.ToString();
+    }
+
+    static string TruncateEssence(string content)
+    {
         return content.Length > 80 ? content[..80] + "..." : content;
     }
 
