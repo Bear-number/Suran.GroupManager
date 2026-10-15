@@ -4,7 +4,7 @@
 QQ 群聊管家，移植自 KiraAI 的 Group-Manager-Plugin，功能对齐：禁言/踢人/名片/撤回/成员查询/群公告/精华消息/专属头衔/加群申请审批/成员变动感知。所有操作通过 OneBot 正向 WebSocket 直发协议端，插件自持连接（常驻接收循环统一处理响应与事件，断线自动重连）。
 
 ## 版本
-4.0.0（对应 Alife 客户端 4.2.x）
+4.1.0（对应 Alife 客户端 4.2.x）
 
 ## 依赖
 - Alife.Function.FunctionCaller
@@ -26,7 +26,7 @@ QQ 群聊管家，移植自 KiraAI 的 Group-Manager-Plugin，功能对齐：禁
 | EnablePresenceNotice | 关 | 退群/被踢时告知AI |
 | EnableWelcome | 关 | 新人入群自动发欢迎语 |
 | WelcomeTemplate | 欢迎 {nickname} 加入本群～ | 占位符 {nickname} / {user_id} |
-| EnableJoinRequest | 关 | 加群申请轮询与审批（依赖协议端 get_group_system_msg） |
+| EnableJoinRequest | 关 | 加群申请轮询与审批（依赖协议端 get_group_system_msg；SnowLuma 未实现，探测到会自动停轮询） |
 | JoinPollIntervalMinutes | 10 | 轮询间隔，0为关闭 |
 | JoinRequestMode | ask_master | ask_master / auto / notify_only |
 | MasterQQ | 空 | 主人QQ号（ask_master / notify_only 必填） |
@@ -53,8 +53,20 @@ QQ 群聊管家，移植自 KiraAI 的 Group-Manager-Plugin，功能对齐：禁
 
 ## 事件能力
 - 成员变动：退群/被踢/被踢出（kick_me）实时告知AI；入群自动发欢迎语（均可关）
+- 变动与加群申请提示都带「群名(群号)」，多群 Bot 能一眼看出是哪个群；群名用 get_group_info 取并按群缓存，取不到退回群号
 - 加群申请：按分钟级轮询 get_group_system_msg，首轮只建基线不通知，新申请按模式分发——ask_master/auto 推给AI决策（附防注入提示），notify_only 私聊主人
-- 已处理申请自动过滤，兼容 NapCat（data.join_requests + actor）与 SnowLuma（data 数组 + checked）两种返回格式
+- 已处理申请自动过滤，兼容 NapCat/LLOneBot（data.join_requests + actor）与 SnowLuma（data 数组 + checked）两种返回格式
+
+## 协议端兼容（NapCat / LLOneBot / SnowLuma）
+- 启动 5 秒后用 get_version_info 识别协议端（`app_name`、`name`、`vendor` 三字段全取，实测 LLOneBot 只回 app_name），识别结果写普通日志并在错误里署名
+- 接口未实现（retcode 1404）时报「协议端 X 未实现该接口，请检查协议端设置或更换支持的协议端」，不再只丢一个裸错误码
+- 加群申请条目字段按端回退：`requester_uin`→`invitor_uin`→`user_id`、`requester_nick`→`nickname`、`flag`→`request_id`。本机实测 LLOneBot 7.12.14 的 `get_group_system_msg` 回 `data.join_requests`，条目含 `request_id`/`requester_uin`/`requester_nick`/`message`/`group_id`/`group_name`/`checked`/`actor`（**没有 flag**，标识只能用 request_id），已处理标记是 `checked=true`（bool 与数字两种写法都接受）
+- NapCat 的申请条目里申请人 UIN 发在 `invitor_uin` 上，既没有 `requester_uin` 也没有 `user_id`，且 `requester_nick` 与 `invitor_nick` 同值（它自己源码的怪癖），所以必须留 invitor_uin 这一路回退，否则通知里申请人 QQ 空着
+- 三端的 `set_group_add_request` 都要求 flag 是字符串，且都能把 request_id 当 flag 解析，SnowLuma 也收纯数字，回退是安全的
+- **SnowLuma 没有注册 `get_group_system_msg`（实测回 1404）**：轮询探测到不支持时打一条带协议端署名的日志并停止轮询，不每轮重复刷同一句话；SnowLuma 用户要靠加群申请事件或换 NapCat/LLOneBot
+- 群公告删除动作名两端不同（NapCat `_del_group_notice` / LLOneBot `_delete_group_notice`），依次尝试；精华列表统一 `get_essence_msg_list`（`get_group_essence_msg_list` 三端都不存在，已移除无效探测）
+- 专属头衔的 `duration` 参数三端实测都忽略，头衔一律长期有效，函数描述里已注明不要向用户承诺到期时间
+- 精华/公告返回结构不认识或列表为空时打印原始返回（截断 500 字），远程用户不用开详细日志也能回报
 
 ## 安全设计（继承自原插件）
 - 分层权限：AI自主执行 vs 管理员命令，独立开关

@@ -82,7 +82,7 @@ public class GroupManagerConfig
 
     // ---- 加群申请 ----
     [DisplayName("加群·启用申请处理")]
-    [Description("开启后定时轮询待处理加群申请并按模式分发，依赖NapCat等协议端的 get_group_system_msg 接口")]
+    [Description("开启后定时轮询待处理加群申请并按模式分发。依赖 get_group_system_msg：NapCat/LLOneBot 有，SnowLuma 未实现，探测到不支持时自动停止轮询")]
     public bool EnableJoinRequest { get; set; } = false;
 
     [DisplayName("加群·轮询间隔(分钟)")]
@@ -112,6 +112,7 @@ public class GroupManagerModule(
     // ---- 连接层私有字段 ----
     static readonly SemaphoreSlim sendLock = new(1, 1);
     static readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingResponses = new();
+    static string providerName = "";
     static ClientWebSocket? sharedConnection;
     static TaskCompletionSource<bool> connectionReady = CreateReadySource();
 
@@ -121,6 +122,9 @@ public class GroupManagerModule(
     DateTime lastJoinPollTime = DateTime.MinValue;
     readonly List<string> seenJoinRequestKeys = new();
     bool joinBaselineRecorded;
+    readonly Dictionary<long, string> groupNameCache = new();
+    // 协议端压根没实现 get_group_system_msg（SnowLuma 回 1404）时置位，轮询就此停掉，不再每轮重复报同一句话
+    bool joinPollUnsupported;
     bool adminCheckStarted;
 
     // ============================================================
@@ -141,6 +145,7 @@ public class GroupManagerModule(
     protected override Task OnStart()
     {
         StartReceiveLoop();
+        StartProviderCheck();
         if (Configuration.AutoCheckAdmin)
         {
             StartAdminCheck();
@@ -152,7 +157,8 @@ public class GroupManagerModule(
 
     protected override async Task OnUpdate()
     {
-        if (Configuration.EnableJoinRequest == false || Configuration.JoinPollIntervalMinutes <= 0)
+        if (Configuration.EnableJoinRequest == false || Configuration.JoinPollIntervalMinutes <= 0
+            || joinPollUnsupported)
         {
             return;
         }
@@ -164,6 +170,12 @@ public class GroupManagerModule(
         try
         {
             await PollJoinRequestsAsync();
+        }
+        catch (UnsupportedActionException unsupportedError)
+        {
+            joinPollUnsupported = true;
+            logger.LogWarning("[群管] 加群申请轮询已停止：{Message}。可改用群事件里的加群申请上报，或换 NapCat/LLOneBot",
+                unsupportedError.Message);
         }
         catch (Exception pollError)
         {
@@ -182,6 +194,9 @@ public class GroupManagerModule(
             pendingResponses.Clear();
             receiveLoopStarted = false;
             joinBaselineRecorded = false;
+            joinPollUnsupported = false;
+            groupNameCache.Clear();
+            providerName = "";
         }
         finally
         {
@@ -398,11 +413,38 @@ public class GroupManagerModule(
             // 常见协议端错误码翻译：1404 = 接口存在但协议端未开启/未实现
             if (retcode == 1404)
             {
-                detail += "（协议端未开放该接口，请检查协议端设置或更换支持的协议端）";
+                detail += "（" + (providerName.Length > 0 ? providerName : "该协议端")
+                    + " 未实现该接口，请检查协议端设置或更换支持的协议端）";
+                throw new UnsupportedActionException(operationName + "失败：" + detail + "（retcode " + retcode + "）");
             }
             throw new Exception(operationName + "失败：" + detail + "（retcode " + retcode + "）");
         }
         return root.TryGetProperty("data", out JsonElement dataElement) ? dataElement.Clone() : JsonDocument.Parse("null").RootElement.Clone();
+    }
+
+    // 启动时认一次协议端（NapCat / LLOneBot / SnowLuma）：三端的私有动作名与返回形状各有出入，
+    // 认出是哪一端，报错和空结果的日志才说得出人话
+    void StartProviderCheck()
+    {
+        Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), DestroyCancellationToken);
+                string response = await CallActionAsync("get_version_info", new JsonObject());
+                JsonElement data = ParseActionResponse(response, "获取协议端版本");
+                // 实测 LLOneBot 只回 app_name，go-cqhttp 系才回 name/vendor，两种都取
+                providerName = (GetStringField(data, "app_name") + " " + GetStringField(data, "name")
+                    + " " + GetStringField(data, "vendor")).Trim();
+                string version = GetStringField(data, "app_version");
+                logger.LogInformation("[群管] 协议端：{Provider} {Version}",
+                    providerName.Length > 0 ? providerName : "未识别", version);
+            }
+            catch (Exception versionError)
+            {
+                logger.LogInformation("[群管] 未能识别协议端：{Message}", versionError.Message);
+            }
+        }, DestroyCancellationToken);
     }
 
     // ============================================================
@@ -464,6 +506,38 @@ public class GroupManagerModule(
     // 事件处理：成员变动
     // ============================================================
 
+    // 提示里只有群号时，Bot 管着好几个群根本看不出是哪一个，所以把群号换算成「群名(群号)」；
+    // 群名取不到不影响功能，退回群号，成员变动事件同一群会反复触发，按群号缓存避免每次一发请求
+    async Task<string> FormatGroupDisplayAsync(long groupId)
+    {
+        if (groupId == 0)
+        {
+            return "未知群";
+        }
+        if (groupNameCache.TryGetValue(groupId, out string? cached) && cached != null)
+        {
+            return cached;
+        }
+        string display = "群" + groupId;
+        try
+        {
+            JsonObject parameters = new() { ["group_id"] = groupId };
+            string response = await CallActionAsync("get_group_info", parameters);
+            JsonElement data = ParseActionResponse(response, "获取群信息");
+            string groupName = GetStringField(data, "group_name");
+            if (groupName.Length > 0)
+            {
+                display = groupName + "(" + groupId + ")";
+            }
+        }
+        catch (Exception groupError)
+        {
+            logger.LogInformation("[群管] 群 {Group} 名称获取失败，提示里只用群号：{Message}", groupId, groupError.Message);
+        }
+        groupNameCache[groupId] = display;
+        return display;
+    }
+
     async Task HandleGroupIncreaseAsync(JsonElement notice)
     {
         long groupId = notice.TryGetProperty("group_id", out JsonElement groupElement) ? groupElement.GetInt64() : 0;
@@ -492,7 +566,8 @@ public class GroupManagerModule(
         }
         if (Configuration.EnablePresenceNotice)
         {
-            interactor.Poke("新成员 " + display + " 加入了群 " + groupId);
+            string groupText = await FormatGroupDisplayAsync(groupId);
+            interactor.Poke("新成员 " + display + " 加入了 " + groupText);
         }
     }
 
@@ -510,20 +585,21 @@ public class GroupManagerModule(
             : "";
 
         string userDisplay = await FormatUserDisplayAsync(groupId, userId);
+        string groupText = await FormatGroupDisplayAsync(groupId);
         string text;
         if (subType == "kick_me")
         {
             string operatorDisplay = await FormatUserDisplayAsync(groupId, operatorId);
-            text = "⚠️ 你被管理员 " + operatorDisplay + " 踢出了群 " + groupId;
+            text = "⚠️ 你被管理员 " + operatorDisplay + " 踢出了 " + groupText;
         }
         else if (subType == "kick")
         {
             string operatorDisplay = await FormatUserDisplayAsync(groupId, operatorId);
-            text = "成员 " + userDisplay + " 被 " + operatorDisplay + " 踢出了群聊";
+            text = "成员 " + userDisplay + " 被 " + operatorDisplay + " 踢出了 " + groupText;
         }
         else
         {
-            text = "成员 " + userDisplay + " 退出了群聊";
+            text = "成员 " + userDisplay + " 退出了 " + groupText;
         }
         interactor.Poke(text);
         LogOperation("退群感知", "system", userId.ToString(), text);
@@ -701,46 +777,8 @@ public class GroupManagerModule(
 
     async Task PollJoinRequestsAsync()
     {
-        JsonObject parameters = new();
-        string response = await CallActionAsync("get_group_system_msg", parameters);
-        JsonElement data = ParseActionResponse(response, "获取群系统消息");
-
-        // NapCat：data 是对象，申请在 join_requests 里；SnowLuma 等：data 直接是数组
-        IEnumerable<JsonElement> requestItems;
-        if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("join_requests", out JsonElement nestedRequests))
-        {
-            requestItems = nestedRequests.EnumerateArray().ToList();
-        }
-        else if (data.ValueKind == JsonValueKind.Array)
-        {
-            requestItems = data.EnumerateArray().ToList();
-        }
-        else
-        {
-            return;
-        }
-
-        List<JsonElement> pendingRequests = new();
-        foreach (JsonElement requestItem in requestItems)
-        {
-            if (requestItem.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
-            // NapCat 用 actor 非空表示已被处理；SnowLuma 用 checked 布尔
-            string actor = GetStringField(requestItem, "actor");
-            bool checkedAlready = requestItem.TryGetProperty("checked", out JsonElement checkedElement)
-                && checkedElement.ValueKind == JsonValueKind.True;
-            if (actor.Length > 0 && actor != "0" || checkedAlready)
-            {
-                continue;
-            }
-            if (GetStringField(requestItem, "request_id").Length == 0)
-            {
-                continue;
-            }
-            pendingRequests.Add(requestItem.Clone());
-        }
+        string response = await CallActionAsync("get_group_system_msg", new JsonObject());
+        List<JsonElement> pendingRequests = ExtractPendingJoinRequests(response);
 
         List<string> baselineKeys = new();
         List<JsonElement> newRequests = new();
@@ -776,30 +814,68 @@ public class GroupManagerModule(
         }
     }
 
+    // 申请人类别字段三端对不齐：实测 LLOneBot 有 requester_uin；NapCat 的 join_requests 里申请人 UIN
+    // 仍然发在 invitor_uin 上（它自己源码的怪癖），没有 requester_uin 也没有 user_id。
+    // 缺字段不报错，只会让通知里申请人 QQ 空着，所以按实测覆盖度排回退顺序
+    static string RequesterUin(JsonElement request)
+    {
+        string uin = GetStringField(request, "requester_uin");
+        if (uin.Length > 0)
+        {
+            return uin;
+        }
+        uin = GetStringField(request, "invitor_uin");
+        if (uin.Length > 0)
+        {
+            return uin;
+        }
+        return GetStringField(request, "user_id");
+    }
+
+    static string RequesterNick(JsonElement request)
+    {
+        string nick = GetStringField(request, "requester_nick");
+        if (nick.Length > 0)
+        {
+            return nick;
+        }
+        nick = GetStringField(request, "nickname");
+        return nick.Length > 0 ? nick : "(无昵称)";
+    }
+
     static string BuildJoinRequestKey(JsonElement request)
     {
         return GetStringField(request, "group_id") + ":"
-            + GetStringField(request, "requester_uin") + ":"
-            + GetStringField(request, "request_id");
+            + RequesterUin(request) + ":"
+            + JoinRequestFlag(request);
+    }
+
+    // 申请标识：实测 NapCat 与 LLOneBot 的申请条目都没有 flag，只有 request_id（大整数）。
+    // 三端的 set_group_add_request 都要求 flag 是字符串，且 NapCat/LLOneBot 都能把 request_id
+    // 当 flag 解析、SnowLuma 也接受纯数字（等价于 request_id），所以这里回退到 request_id 是安全的
+    static string JoinRequestFlag(JsonElement request)
+    {
+        string flag = GetStringField(request, "flag");
+        return flag.Length > 0 ? flag : GetStringField(request, "request_id");
     }
 
     async Task DispatchJoinRequestAsync(JsonElement request)
     {
         long groupId = GetNumericField(request, "group_id");
-        string groupText = groupId > 0 ? "群" + groupId : "";
-        string requesterUin = GetStringField(request, "requester_uin");
-        string requesterNick = GetStringField(request, "requester_nick");
+        string requestGroupName = GetStringField(request, "group_name");
+        if (groupId > 0 && requestGroupName.Length > 0)
+        {
+            groupNameCache[groupId] = requestGroupName + "(" + groupId + ")";
+        }
+        string groupText = await FormatGroupDisplayAsync(groupId);
+        string requesterUin = RequesterUin(request);
+        string requesterNick = RequesterNick(request);
         string comment = GetStringField(request, "message").Trim();
         if (comment.Length == 0)
         {
             comment = "(无验证消息)";
         }
-        // SnowLuma 自带规范 flag；NapCat 无此字段时回退 request_id
-        string flag = GetStringField(request, "flag");
-        if (flag.Length == 0)
-        {
-            flag = GetStringField(request, "request_id");
-        }
+        string flag = JoinRequestFlag(request);
         string mode = Configuration.JoinRequestMode.Trim().ToLowerInvariant();
         logger.LogInformation("新加群申请：{Group} 用户{Uin}({Nick}) 模式={Mode}", groupText, requesterUin, requesterNick, mode);
 
@@ -1389,44 +1465,17 @@ public class GroupManagerModule(
         try
         {
             JsonObject parameters = new() { ["group_id"] = groupId };
-            // NapCat 用 get_essence_msg_list，LLOneBot 系用 get_group_essence_msg_list，依次尝试
-            JsonElement items = JsonDocument.Parse("null").RootElement.Clone();
-            string[] essenceActions = new[] { "get_essence_msg_list", "get_group_essence_msg_list" };
-            Exception lastError = new Exception("接口调用失败");
-            bool called = false;
-            string usedAction = "";
-            string rawResponse = "";
-            foreach (string essenceAction in essenceActions)
-            {
-                try
-                {
-                    string response = await CallActionAsync(essenceAction, parameters);
-                    items = ParseActionResponse(response, "获取精华列表");
-                    called = true;
-                    usedAction = essenceAction;
-                    rawResponse = response;
-                    break;
-                }
-                catch (Exception attemptError)
-                {
-                    lastError = attemptError;
-                }
-            }
-            if (called == false)
-            {
-                throw lastError;
-            }
+            // 三端列表动作都是 get_essence_msg_list；未实现的端回 1404，由 ParseActionResponse 报「协议端不支持」
+            string response = await CallActionAsync("get_essence_msg_list", parameters);
+            JsonElement items = ParseActionResponse(response, "获取精华列表");
             List<JsonElement> allItems = items.ValueKind == JsonValueKind.Array
                 ? items.EnumerateArray().ToList()
                 : new List<JsonElement>();
             if (allItems.Count == 0)
             {
                 // 空列表时打印原始返回，便于定位协议端返回结构与预期不符的情况
-                logger.LogInformation("[群管] 精华列表为空（动作 {Action}），原始返回: {Raw}",
-                    usedAction, rawResponse.Length > 500 ? rawResponse[..500] : rawResponse);
-            }
-            if (allItems.Count == 0)
-            {
+                logger.LogInformation("[群管] 精华列表为空，原始返回: {Raw}",
+                    response.Length > 500 ? response[..500] : response);
                 interactor.Poke("📋 本群暂无精华消息");
                 return;
             }
@@ -1475,7 +1524,7 @@ public class GroupManagerModule(
         [Description("群号")] long groupId,
         [Description("目标QQ号")] long userId,
         [Description("头衔文字，空字符串取消头衔")] string title,
-        [Description("有效天数，-1为永久，默认-1")] int durationDays = -1,
+        [Description("有效天数，-1为永久。注意：NapCat/LLOneBot/SnowLuma 三端实测都忽略该参数，头衔一律长期有效，不要向用户承诺到期时间")] int durationDays = -1,
         [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
     {
         if (Gate(Configuration.EnableSpecialTitle, "专属头衔"))
@@ -1523,27 +1572,22 @@ public class GroupManagerModule(
         try
         {
             List<JsonElement> pendingRequests = await FetchPendingJoinRequestsAsync();
+            if (pendingRequests.Count == 0)
+            {
+                interactor.Poke("📋 当前没有待处理的加群申请");
+                return;
+            }
             List<string> lines = new() { "📋 待处理加群申请（共 " + pendingRequests.Count + " 条）：" };
             foreach (JsonElement request in pendingRequests)
             {
-                string flag = GetStringField(request, "flag");
-                if (flag.Length == 0)
-                {
-                    flag = GetStringField(request, "request_id");
-                }
                 string comment = GetStringField(request, "message").Trim();
                 if (comment.Length == 0)
                 {
                     comment = "(无验证消息)";
                 }
                 lines.Add("- 群" + GetStringField(request, "group_id") + " | "
-                    + GetStringField(request, "requester_nick") + "(" + GetStringField(request, "requester_uin") + ")"
-                    + "\n  验证消息：" + comment + "\n  request_flag=" + flag);
-            }
-            if (pendingRequests.Count == 0)
-            {
-                interactor.Poke("📋 当前没有待处理的加群申请");
-                return;
+                    + RequesterNick(request) + "(" + RequesterUin(request) + ")"
+                    + "\n  验证消息：" + comment + "\n  request_flag=" + JoinRequestFlag(request));
             }
             lines.Add("使用 HandleJoinRequest 并传入对应 request_flag 来通过或拒绝。");
             interactor.Poke(string.Join("\n", lines));
@@ -1829,41 +1873,60 @@ public class GroupManagerModule(
     async Task<List<JsonElement>> FetchPendingJoinRequestsAsync()
     {
         string response = await CallActionAsync("get_group_system_msg", new JsonObject());
-        JsonElement data = ParseActionResponse(response, "获取群系统消息");
+        return ExtractPendingJoinRequests(response);
+    }
+
+    List<JsonElement> ExtractPendingJoinRequests(string responseText)
+    {
+        JsonElement data = ParseActionResponse(responseText, "获取群系统消息");
         List<JsonElement> pendingRequests = new();
-        IEnumerable<JsonElement> requestItems;
-        if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("join_requests", out JsonElement nestedRequests))
+        foreach (JsonElement requestItem in ExtractJoinRequests(data, responseText))
         {
-            requestItems = nestedRequests.EnumerateArray().ToList();
-        }
-        else if (data.ValueKind == JsonValueKind.Array)
-        {
-            requestItems = data.EnumerateArray().ToList();
-        }
-        else
-        {
-            return pendingRequests;
-        }
-        foreach (JsonElement requestItem in requestItems)
-        {
-            if (requestItem.ValueKind != JsonValueKind.Object)
+            if (IsPendingJoinRequest(requestItem))
             {
-                continue;
+                pendingRequests.Add(requestItem);
             }
-            string actor = GetStringField(requestItem, "actor");
-            bool checkedAlready = requestItem.TryGetProperty("checked", out JsonElement checkedElement)
-                && checkedElement.ValueKind == JsonValueKind.True;
-            if (actor.Length > 0 && actor != "0" || checkedAlready)
-            {
-                continue;
-            }
-            if (GetStringField(requestItem, "request_id").Length == 0)
-            {
-                continue;
-            }
-            pendingRequests.Add(requestItem.Clone());
         }
         return pendingRequests;
+    }
+
+    // 申请列表的位置分两种：NapCat 与 LLOneBot 回对象、申请在 join_requests，SnowLuma 直接回数组
+    List<JsonElement> ExtractJoinRequests(JsonElement data, string responseText)
+    {
+        if (data.ValueKind == JsonValueKind.Object
+            && data.TryGetProperty("join_requests", out JsonElement nestedRequests)
+            && nestedRequests.ValueKind == JsonValueKind.Array)
+        {
+            return nestedRequests.EnumerateArray().Select(request => request.Clone()).ToList();
+        }
+        if (data.ValueKind == JsonValueKind.Array)
+        {
+            return data.EnumerateArray().Select(request => request.Clone()).ToList();
+        }
+        // 结构不认识时不能静默当“没有申请”，否则换协议端以后无从定位
+        logger.LogInformation("[群管] 加群申请返回结构不认识（协议端 {Provider}），原始返回: {Raw}",
+            providerName.Length > 0 ? providerName : "未识别",
+            responseText.Length > 500 ? responseText[..500] : responseText);
+        return new List<JsonElement>();
+    }
+
+    // 已处理标记两种写法都认：实测 LLOneBot 回 checked=true（同时 actor=0），NapCat 系用 actor 非 0
+    static bool IsPendingJoinRequest(JsonElement request)
+    {
+        if (request.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        string actor = GetStringField(request, "actor");
+        bool handled = request.TryGetProperty("checked", out JsonElement checkedElement)
+            && (checkedElement.ValueKind == JsonValueKind.True
+                || checkedElement.ValueKind == JsonValueKind.Number && checkedElement.GetInt32() != 0);
+        if (actor.Length > 0 && actor != "0" || handled)
+        {
+            return false;
+        }
+        // 只认 request_id 会把 SnowLuma 的申请整批丢掉（它给的是 flag），标识取到任一才算有待处理
+        return JoinRequestFlag(request).Length > 0;
     }
 
     static string GetStringField(JsonElement element, string fieldName)
@@ -1924,3 +1987,7 @@ public class GroupManagerModule(
         }
     }
 }
+
+// retcode 1404：动作在这个协议端根本不存在。调用方需要区分「这一次失败」和「这台端永远不会有」，
+// 前者重试/报错就行，后者该关掉对应的定时功能，不能每轮刷同一条警告
+sealed class UnsupportedActionException(string message) : Exception(message);
