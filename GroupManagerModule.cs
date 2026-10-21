@@ -82,7 +82,7 @@ public class GroupManagerConfig
 
     // ---- 加群申请 ----
     [DisplayName("加群·启用申请处理")]
-    [Description("开启后定时轮询待处理加群申请并按模式分发。依赖 get_group_system_msg：NapCat/LLOneBot 有，SnowLuma 未实现，探测到不支持时自动停止轮询")]
+    [Description("开启后定时轮询待处理加群申请并按模式分发。依赖 get_group_system_msg：NapCat/LLOneBot/SnowLuma 三端都实现了这个接口，若某台端仍回未实现，探测到会自动停止轮询")]
     public bool EnableJoinRequest { get; set; } = false;
 
     [DisplayName("加群·轮询间隔(分钟)")]
@@ -123,7 +123,7 @@ public class GroupManagerModule(
     readonly List<string> seenJoinRequestKeys = new();
     bool joinBaselineRecorded;
     readonly Dictionary<long, string> groupNameCache = new();
-    // 协议端压根没实现 get_group_system_msg（SnowLuma 回 1404）时置位，轮询就此停掉，不再每轮重复报同一句话
+    // 协议端压根没实现 get_group_system_msg（回 1404）时置位，轮询就此停掉，不再每轮重复报同一句话
     bool joinPollUnsupported;
     bool adminCheckStarted;
 
@@ -174,7 +174,7 @@ public class GroupManagerModule(
         catch (UnsupportedActionException unsupportedError)
         {
             joinPollUnsupported = true;
-            logger.LogWarning("[群管] 加群申请轮询已停止：{Message}。可改用群事件里的加群申请上报，或换 NapCat/LLOneBot",
+            logger.LogWarning("[群管] 加群申请轮询已停止：{Message}。可改用群事件里的加群申请上报，或换已实现该接口的协议端",
                 unsupportedError.Message);
         }
         catch (Exception pollError)
@@ -407,10 +407,17 @@ public class GroupManagerModule(
         bool succeeded = status == "ok" || status == "async" || retcode == 0;
         if (succeeded == false)
         {
-            string detail = root.TryGetProperty("message", out JsonElement messageElement) && messageElement.ValueKind == JsonValueKind.String
-                ? messageElement.GetString() ?? ""
-                : "未知错误";
-            // 常见协议端错误码翻译：1404 = 接口存在但协议端未开启/未实现
+            // SnowLuma 的失败包只填 wording（LLOneBot/NapCat 两个键都填同一个值），只读 message 在 SnowLuma 下永远是「未知错误」
+            string detail = GetStringField(root, "message");
+            if (detail.Length == 0)
+            {
+                detail = GetStringField(root, "wording");
+            }
+            if (detail.Length == 0)
+            {
+                detail = "未知错误";
+            }
+            // 1404 = 接口存在但协议端未开启/未实现
             if (retcode == 1404)
             {
                 detail += "（" + (providerName.Length > 0 ? providerName : "该协议端")
