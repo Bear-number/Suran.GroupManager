@@ -4,7 +4,11 @@
 QQ 群聊管家，移植自 KiraAI 的 Group-Manager-Plugin，功能对齐：禁言/踢人/名片/撤回/成员查询/群公告/精华消息/专属头衔/加群申请审批/成员变动感知。所有操作通过 OneBot 正向 WebSocket 直发协议端，插件自持连接（常驻接收循环统一处理响应与事件，断线自动重连）。
 
 ## 版本
-4.1.1（对应 Alife 客户端 4.2.x）
+5.0.0（对应 Alife 客户端 5.0.x；本机 5.0.2 在役客户端已热编译装载成功）
+
+## 5.0.0 的改动
+- 版本号对齐客户端主版本（官方约定：插件版本首位应与客户端一致，`PluginSystem.IsClientCompatible` 按主版本判定）
+- 只走 OneBot HTTP 动作，未涉及外部程序与平台 API；本版只做版本对齐与在役客户端装载确认
 
 ## 依赖
 - Alife.Function.FunctionCaller
