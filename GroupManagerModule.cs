@@ -12,6 +12,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Alife.Function.FunctionCaller;
+using Alife.Foundation;
 using Alife.Framework;
 using Microsoft.Extensions.Logging;
 
@@ -20,9 +21,13 @@ namespace Suran.GroupManager;
 public class GroupManagerConfig
 {
     // ---- 连接 ----
-    [DisplayName("连接·协议端地址")]
-    [Description("OneBot正向WebSocket地址，NapCat/Lagrange等，默认 ws://127.0.0.1:3001")]
-    public string OneBotWsUrl { get; set; } = "ws://127.0.0.1:3001";
+    [DisplayName("基础·协议端地址")]
+    [Description("留空 = 自动跟随「QQ 聊天」插件的配置（推荐）。填了就用这里的，例如 ws://127.0.0.1:3001")]
+    public string OneBotWsUrl { get; set; } = "";
+
+    [DisplayName("基础·访问令牌")]
+    [Description("与协议端配置的 token 一致。留空 = 跟随「QQ 聊天」插件。填了地址却没填这里，协议端一开 token 就会连不上")]
+    public string OneBotToken { get; set; } = "";
 
     // ---- 权限与日志 ----
     [DisplayName("权限·管理员QQ列表")]
@@ -82,7 +87,7 @@ public class GroupManagerConfig
 
     // ---- 加群申请 ----
     [DisplayName("加群·启用申请处理")]
-    [Description("开启后定时轮询待处理加群申请并按模式分发。依赖 get_group_system_msg：NapCat/LLOneBot/SnowLuma 三端都实现了这个接口，若某台端仍回未实现，探测到会自动停止轮询")]
+    [Description("是否定时轮询待处理的加群申请。")]
     public bool EnableJoinRequest { get; set; } = false;
 
     [DisplayName("加群·轮询间隔(分钟)")]
@@ -100,7 +105,8 @@ public class GroupManagerConfig
 
 [Module("群聊管家",
     "QQ群管理：禁言/踢人/名片/撤回/成员查询/公告/精华/头衔/加群申请/成员变动感知，高危功能均有独立开关",
-    defaultCategory: "苏染的工具")]
+    defaultCategory: "苏染的工具",
+    EditorUI = typeof(GroupManagerUI))]
 public class GroupManagerModule(
     XmlFunctionCaller functionCaller,
     ILogger<GroupManagerModule> logger,
@@ -108,6 +114,66 @@ public class GroupManagerModule(
 ) : ChatBehaviour, IConfigurable<GroupManagerConfig>
 {
     public GroupManagerConfig Configuration { get; set; } = null!;
+
+    /// <summary>
+    /// 协议端连接信息。
+    ///
+    /// 地址留空时跟随「QQ 聊天」插件的配置——那是唯一值得人填一次的地方。
+    /// 换端口、给协议端开 token，都不用回来改这个插件，读它的配置就够。
+    /// 读不到就退回上一个版本的默认值，行为和以前完全一致。
+    /// </summary>
+    (string Url, string Token, string Source) ResolveOneBot()
+    {
+        string url = (Configuration.OneBotWsUrl ?? "").Trim();
+        string token = (Configuration.OneBotToken ?? "").Trim();
+
+        if (url.Length > 0)
+            return (url, token, "本插件");
+
+        // 按角色存，所以换角色读的是那个角色自己的 QQ 配置——不同角色可能是不同 bot 账号，这是对的。
+        // 第二条是兜底：StorageFolderPath 若已含角色层、或 StorageKey 为空，靠第一条拼不出来。
+        string[] candidates =
+        [
+            Path.Combine(AlifePath.StorageFolderPath, Character.StorageKey,
+                "Configuration", "Alife.Function.QChat.QChatService.json"),
+            Path.Combine(AlifePath.StorageFolderPath,
+                "Configuration", "Alife.Function.QChat.QChatService.json"),
+        ];
+
+        foreach (string path in candidates)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+
+                using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+                string sharedUrl = document.RootElement.TryGetProperty("Url", out JsonElement u) ? u.GetString() ?? "" : "";
+                string sharedToken = document.RootElement.TryGetProperty("Token", out JsonElement t) ? t.GetString() ?? "" : "";
+                if (sharedUrl.Trim().Length > 0)
+                    return (sharedUrl.Trim(), token.Length > 0 ? token : sharedToken.Trim(), "QQ 聊天插件");
+            }
+            catch (Exception)
+            {
+                // 这个候选读不了就试下一个。配置坏了也不该让发消息失败在读取配置上
+            }
+        }
+
+        return ("ws://127.0.0.1:3001", token, "默认");
+    }
+
+    /// <summary>
+    /// 建连并鉴权。
+    /// token 必须在 ConnectAsync 之前写进请求头——连上之后 ClientWebSocket 不允许再改 Options。
+    /// </summary>
+    async Task ConnectOneBotAsync(ClientWebSocket connection, CancellationToken cancellationToken)
+    {
+        (string url, string token, _) = ResolveOneBot();
+        if (token.Length > 0)
+            connection.Options.SetRequestHeader("Authorization", "Bearer " + token);
+        await connection.ConnectAsync(new Uri(url), cancellationToken);
+    }
+
 
     // ---- 连接层私有字段 ----
     static readonly SemaphoreSlim sendLock = new(1, 1);
@@ -231,10 +297,10 @@ public class GroupManagerModule(
                     sharedConnection?.Dispose();
                     ClientWebSocket connection = new();
                     using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-                    await connection.ConnectAsync(new Uri(Configuration.OneBotWsUrl), connectTimeout.Token);
+                    await ConnectOneBotAsync(connection, connectTimeout.Token);
                     sharedConnection = connection;
                     connectionReady.TrySetResult(true);
-                    logger.LogInformation("协议端已连接：{Url}", Configuration.OneBotWsUrl);
+                    logger.LogInformation("协议端已连接：{Url}", ResolveOneBot().Url);
                     await ReceiveLoopCoreAsync(connection);
                 }
                 catch (Exception loopError)
@@ -361,7 +427,7 @@ public class GroupManagerModule(
                 sharedConnection?.Dispose();
                 ClientWebSocket connection = new();
                 using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-                await connection.ConnectAsync(new Uri(Configuration.OneBotWsUrl), connectTimeout.Token);
+                await ConnectOneBotAsync(connection, connectTimeout.Token);
                 sharedConnection = connection;
                 connectionReady.TrySetResult(true);
             }

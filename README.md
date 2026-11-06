@@ -16,7 +16,8 @@ QQ 群聊管家，移植自 KiraAI 的 Group-Manager-Plugin，功能对齐：禁
 ## 配置
 | 键 | 默认 | 说明 |
 |---|---|---|
-| OneBotWsUrl | ws://127.0.0.1:3001 | OneBot 正向 WebSocket 地址 |
+| OneBotWsUrl | 空 | OneBot 正向 WebSocket 地址。**留空 = 自动跟随「QQ 聊天」插件**的配置 |
+| OneBotToken | 空 | 协议端访问令牌。留空 = 跟随「QQ 聊天」插件 |
 | AdminList | 空 | 管理员QQ列表，英文逗号分隔；关闭AI自主执行时只有这些人和系统可调用 |
 | AllowAiAutonomous | 开 | 允许AI自主执行（AI自行决定的操作直接放行） |
 | AutoCheckAdmin | 开 | 启动后自检 Bot 在各群的管理员身份并写日志 |
