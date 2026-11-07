@@ -105,7 +105,7 @@ public class GroupManagerConfig
 
 [Module("群聊管家",
     "QQ群管理：禁言/踢人/名片/撤回/成员查询/公告/精华/头衔/加群申请/成员变动感知，高危功能均有独立开关",
-    defaultCategory: "苏染的工具",
+    defaultCategory: "苏染的工具/QQ与群管理",
     EditorUI = typeof(GroupManagerUI))]
 public class GroupManagerModule(
     XmlFunctionCaller functionCaller,
