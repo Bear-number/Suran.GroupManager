@@ -20,6 +20,10 @@ namespace Suran.GroupManager;
 
 public class GroupManagerConfig
 {
+    [DisplayName("运行·功能文档常驻")]
+    [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是主人明确下令时用，默认关")]
+    public bool DocumentAlwaysResident { get; set; } = false;
+
     // ---- 连接 ----
     [DisplayName("基础·协议端地址")]
     [Description("留空 = 自动跟随「QQ 聊天」插件的配置（推荐）。填了就用这里的，例如 ws://127.0.0.1:3001")]
@@ -204,7 +208,9 @@ public class GroupManagerModule(
             Description = "QQ群管理工具集：禁言/解禁/名片/撤回/成员查询/公告/精华/头衔/加群申请/询问主人，高危功能与可选功能受配置开关控制。",
             Explanation = "管理操作需要Bot是群管理员。operatorId 填发起操作的用户QQ号（从消息上下文获取），自主决策填 system。可选功能（踢人/全员禁言/公告/精华/头衔/加群申请）默认关闭，需在模块配置中开启。"
         };
-        functionCaller.RegisterHandler(handler, DocumentMode.Implicit, cancellationToken: DestroyCancellationToken);
+        functionCaller.RegisterHandler(handler,
+            (Configuration?.DocumentAlwaysResident ?? false) ? DocumentMode.Explicit : DocumentMode.Implicit,
+            cancellationToken: DestroyCancellationToken);
         return Task.CompletedTask;
     }
 
