@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
@@ -13,23 +13,19 @@ using Microsoft.AspNetCore.Components.Web;
 namespace Suran.GroupManager;
 
 /// <summary>
-/// 通用配置界面。
+/// 通用配置界面，外观对齐 EmotionTTS 那一页（gs- 皮肤：紫色 hero + 左侧色条分区 + 统一控件）。
 ///
 /// 这些插件的配置项命名一直是「分组·名称」（`检索·默认返回条数`、`网络·代理地址`），
-/// 说明文字又都写在 Description 里、动辄两三百字。宿主自动生成的页面把这两样平铺成一长列，
-/// 结果就是「十几个输入框 + 十几段小字」，改一个开关要滚半天，还得逐条读才知道自己在改什么。
-///
-/// 这个渲染器做三件事，都不碰业务：
-///   1. 按 DisplayName 里的 `·` 自动分组，每组一张可折叠卡片（默认只展开第一组）
-///   2. 说明不再占正文，缩成标签下一行小字；超过 8 项时给一个搜索框
-///   3. 一套 CSS 变量统一圆角/间距/字号/主色，跟随宿主主题（有 alife-* 变量就用，没有跟随系统深浅色）
+/// 说明文字又都写在 Description 里、动辄两三百字。所以这里仍然按 `·` 自动分组，
+/// 只是把原来那套通用卡片换成了语音页那套视觉：hero 里有标题、副文案和分组链路，
+/// 每个分组是一张带左侧色条的面板，说明缩成标签下一行小字。
 ///
 /// 每个插件只需要在 XxxUI 里调一次 Render。
 /// </summary>
 public static class SuranUiKit
 {
-    /// <summary>折叠状态按「配置类型 + 分组」记，设置页同时只开一个，静态字典够用</summary>
-    static readonly Dictionary<string, bool> Open = new(StringComparer.Ordinal);
+    /// <summary>折叠状态按「配置类型 + 分组」记，默认全展开（对齐语音页那种一览到底的版式）</summary>
+    static readonly Dictionary<string, bool> Collapsed = new(StringComparer.Ordinal);
     static readonly Dictionary<string, string> Queries = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -40,6 +36,7 @@ public static class SuranUiKit
     {
         public ComponentBase Host = null!;
         public Action Refresh = static () => { };
+        public Action<RenderTreeBuilder, int, string>? RowTail;
     }
 
     /// <summary>头部动作按钮。给需要"点一下跑个探测"的插件用，不用为两个按钮写一整页 UI</summary>
@@ -56,13 +53,14 @@ public static class SuranUiKit
 
     public static void Render(ComponentBase host, Action refresh, RenderTreeBuilder b, object config,
         string title, string subtitle, string accent,
-        IReadOnlyList<UiAction>? actions = null, string? notice = null)
+        IReadOnlyList<UiAction>? actions = null, string? notice = null,
+        Action<RenderTreeBuilder, int, string>? rowTail = null)
     {
-        Ctx ctx = new() { Host = host, Refresh = refresh };
+        Ctx ctx = new() { Host = host, Refresh = refresh, RowTail = rowTail };
         int i = 0;
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "su-root");
-        b.AddAttribute(i++, "style", "--su-accent:" + accent + ";");
+        b.AddAttribute(i++, "style", "--su-accent:" + accent + ";--su-pink:#eb2f96;--su-pink-soft:#f759ab;");
 
         InjectStyles(b, ref i);
 
@@ -70,7 +68,7 @@ public static class SuranUiKit
         List<Field> fields = Describe(config);
         string query = Queries.TryGetValue(key, out string? stored) ? stored : "";
 
-        BuildHeader(b, ref i, title, subtitle, accent, fields.Count, fields.Select(f => f.Group).Distinct().Count());
+        BuildHero(b, ref i, title, subtitle, fields);
 
         if (actions is { Count: > 0 })
         {
@@ -115,14 +113,11 @@ public static class SuranUiKit
             return;
         }
 
-        bool first = true;
         foreach (IGrouping<string, Field> group in visible.GroupBy(f => f.Group))
         {
             string groupKey = key + "|" + group.Key;
-            bool open = Open.TryGetValue(groupKey, out bool stored2) ? stored2 : first;
-            first = false;
-
-            BuildGroup(ctx, b, ref i, groupKey, group.Key, group.ToList(), open, config);
+            bool collapsed = Collapsed.TryGetValue(groupKey, out bool stored2) && stored2;
+            BuildGroup(ctx, b, ref i, groupKey, group.Key, group.ToList(), collapsed, config);
         }
 
         b.OpenElement(i++, "div");
@@ -146,7 +141,8 @@ public static class SuranUiKit
             string raw = prop.GetCustomAttribute<DisplayNameAttribute>()?.DisplayName ?? prop.Name;
             (string group, string label) = Split(raw);
 
-            list.Add(new Field {
+            list.Add(new Field
+            {
                 Prop = prop,
                 Group = group,
                 Label = label,
@@ -177,34 +173,53 @@ public static class SuranUiKit
             || f.Hint.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
-    // ── 头部 / 搜索 ────────────────────────────────────────────
+    // ── 顶部 hero（与语音页同款）────────────────────────────────
 
-    static void BuildHeader(RenderTreeBuilder b, ref int i, string title, string subtitle, string accent, int fields, int groups)
+    static void BuildHero(RenderTreeBuilder b, ref int i, string title, string subtitle, List<Field> fields)
     {
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "su-head");
-
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "su-head-main");
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "su-title");
         b.AddContent(i++, title);
         b.CloseElement();
+
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "class", "su-hero");
+
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "class", "su-hero-title");
+        b.AddContent(i++, title);
+        b.CloseElement();
+
         if (subtitle.Length > 0)
         {
             b.OpenElement(i++, "div");
-            b.AddAttribute(i++, "class", "su-sub");
+            b.AddAttribute(i++, "class", "su-hero-sub");
             b.AddContent(i++, subtitle);
             b.CloseElement();
         }
-        b.CloseElement();
 
         b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "su-meta");
-        b.AddContent(i++, fields + " 项 · " + groups + " 组");
-        b.CloseElement();
+        b.AddAttribute(i++, "class", "su-hero-chain");
+        bool first = true;
+        foreach (string group in fields.Select(f => f.Group).Distinct())
+        {
+            if (first == false)
+            {
+                b.OpenElement(i++, "span");
+                b.AddAttribute(i++, "class", "su-arrow");
+                b.AddContent(i++, "→");
+                b.CloseElement();
+            }
+            first = false;
 
-        b.CloseElement();
+            b.OpenElement(i++, "span");
+            b.AddAttribute(i++, "class", "su-node");
+            b.AddContent(i++, group);
+            b.CloseElement();
+        }
+        b.CloseElement();   // chain
+
+        b.CloseElement();   // hero
     }
 
     static void BuildSearch(Ctx ctx, RenderTreeBuilder b, ref int i, string key, string query)
@@ -226,49 +241,53 @@ public static class SuranUiKit
         b.CloseElement();
     }
 
-    // ── 分组卡片 ───────────────────────────────────────────────
+    // ── 分区面板（左侧色条，对齐 gs-panel）──────────────────────
 
-    static void BuildGroup(Ctx ctx, RenderTreeBuilder b, ref int i, string groupKey, string name, List<Field> fields, bool open, object config)
+    static void BuildGroup(Ctx ctx, RenderTreeBuilder b, ref int i, string groupKey, string name, List<Field> fields, bool collapsed, object config)
     {
         b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", open ? "su-card su-card-open" : "su-card");
+        b.AddAttribute(i++, "class", collapsed ? "su-panel su-panel-collapsed" : "su-panel");
 
         b.OpenElement(i++, "button");
         b.AddAttribute(i++, "type", "button");
-        b.AddAttribute(i++, "class", "su-card-head");
+        b.AddAttribute(i++, "class", "su-panel-head");
         b.AddAttribute(i++, "onclick", EventCallback.Factory.Create<MouseEventArgs>(ctx.Host, _ =>
         {
-            Open[groupKey] = !open;
+            Collapsed[groupKey] = !collapsed;
             ctx.Refresh();
         }));
 
         b.OpenElement(i++, "span");
-        b.AddAttribute(i++, "class", "su-caret");
-        b.AddContent(i++, open ? "▾" : "▸");
+        b.AddAttribute(i++, "class", "su-panel-dot");
         b.CloseElement();
 
         b.OpenElement(i++, "span");
-        b.AddAttribute(i++, "class", "su-card-name");
+        b.AddAttribute(i++, "class", "su-panel-name");
         b.AddContent(i++, name);
         b.CloseElement();
 
         b.OpenElement(i++, "span");
-        b.AddAttribute(i++, "class", "su-card-count");
+        b.AddAttribute(i++, "class", "su-panel-count");
         b.AddContent(i++, fields.Count.ToString(CultureInfo.InvariantCulture));
+        b.CloseElement();
+
+        b.OpenElement(i++, "span");
+        b.AddAttribute(i++, "class", "su-caret");
+        b.AddContent(i++, collapsed ? "▸" : "▾");
         b.CloseElement();
 
         b.CloseElement();   // head
 
-        if (open)
+        if (collapsed == false)
         {
             b.OpenElement(i++, "div");
-            b.AddAttribute(i++, "class", "su-card-body");
+            b.AddAttribute(i++, "class", "su-panel-body");
             foreach (Field field in fields)
                 BuildRow(ctx, b, ref i, config, field);
             b.CloseElement();
         }
 
-        b.CloseElement();   // card
+        b.CloseElement();   // panel
     }
 
     // ── 单行：标签 + 说明 + 控件 ───────────────────────────────
@@ -278,8 +297,12 @@ public static class SuranUiKit
         Type type = field.Prop.PropertyType;
         object? value = SafeGet(field.Prop, config);
 
+        bool multiline = type == typeof(string)
+            && field.Prop.GetCustomAttribute<UiTextAreaAttribute>() != null;
+
         b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", type == typeof(bool) ? "su-row su-row-bool" : "su-row");
+        b.AddAttribute(i++, "class", type == typeof(bool) ? "su-row su-row-bool"
+            : multiline ? "su-row su-row-wide" : "su-row");
 
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "su-row-text");
@@ -339,13 +362,29 @@ public static class SuranUiKit
         }
         else if (type == typeof(string))
         {
-            b.OpenComponent<Input<string>>(i++);
-            b.AddAttribute(i++, "Value", value as string ?? "");
-            b.AddAttribute(i++, "ValueChanged", EventCallback.Factory.Create<string>(ctx.Host, next =>
+            string text = value as string ?? "";
+            if (multiline)
             {
-                Commit(ctx, config, field.Prop, next ?? "");
-            }));
-            b.CloseComponent();
+                // 提示词、文案这类长文本：多行框，整行铺开，别塞进 220px 的窄栏
+                b.OpenElement(i++, "textarea");
+                b.AddAttribute(i++, "class", "su-textarea");
+                b.AddAttribute(i++, "rows", "10");
+                b.AddAttribute(i++, "value", text);
+                b.AddAttribute(i++, "oninput", EventCallback.Factory.Create<ChangeEventArgs>(ctx.Host,
+                    (ChangeEventArgs e) => Commit(ctx, config, field.Prop, e.Value?.ToString() ?? "")));
+                b.AddContent(i++, text);
+                b.CloseElement();
+            }
+            else
+            {
+                b.OpenComponent<Input<string>>(i++);
+                b.AddAttribute(i++, "Value", text);
+                b.AddAttribute(i++, "ValueChanged", EventCallback.Factory.Create<string>(ctx.Host, next =>
+                {
+                    Commit(ctx, config, field.Prop, next ?? "");
+                }));
+                b.CloseComponent();
+            }
         }
         else
         {
@@ -354,6 +393,9 @@ public static class SuranUiKit
             b.AddContent(i++, value?.ToString() ?? "（不支持的类型）");
             b.CloseElement();
         }
+
+        // 插件追加的按钮（比如「查看 / 填入内置提示词」）：放在控件正下方，跟配置项同格
+        ctx.RowTail?.Invoke(b, i, field.Prop.Name);
 
         b.CloseElement();   // ctl
         b.CloseElement();   // row
@@ -384,83 +426,141 @@ public static class SuranUiKit
         ctx.Refresh();
     }
 
-    // ── 样式 ───────────────────────────────────────────────────
+    // ── 样式（gs- 皮肤）──────────────────────────────────────────
 
     static void InjectStyles(RenderTreeBuilder b, ref int i)
     {
         b.OpenElement(i++, "style");
         b.AddContent(i++, """
             .su-root{
-                --su-accent:#2f6fed;
-                --su-radius:12px;
-                --su-bg:var(--alife-bg-container,#ffffff);
-                --su-bg-soft:var(--alife-bg-layout,#f7f8fa);
-                --su-border:var(--alife-border,#e6e8eb);
-                --su-text:var(--alife-text,#1f2328);
-                --su-text-sub:var(--alife-text-secondary,#6b7280);
-                max-width:780px;padding:20px 22px 24px;border-radius:16px;
-                background:var(--su-bg);color:var(--su-text);
-                border:1px solid var(--su-border);
-                font-size:13px;line-height:1.6;
+                --su-accent:#eb2f96;
+                --su-pink:#eb2f96;
+                --su-pink-soft:#f759ab;
+                --su-border:#f7e0ec;
+                --su-panel:#fffafd;
+                --su-text:#434343;
+                --su-sub:#8c8c8c;
+                max-width:820px;padding:18px 20px 22px;border-radius:16px;
+                background:linear-gradient(180deg,#fff0f7 0%,#ffffff 140px);
+                color:var(--su-text);font-size:13px;line-height:1.6;
+                border:1px solid #fce4f0;
             }
             @media (prefers-color-scheme:dark){
-                .su-root{
-                    --su-bg:var(--alife-bg-container,#16181d);
-                    --su-bg-soft:var(--alife-bg-layout,#1e2127);
-                    --su-border:var(--alife-border,#2b2f36);
-                    --su-text:var(--alife-text,#e7e9ec);
-                    --su-text-sub:var(--alife-text-secondary,#9aa1ab);
-                }
+                .su-root{background:linear-gradient(180deg,#2a1622 0%,#16181d 140px);border-color:#3a2532;color:#c9cdd4;}
+                .su-panel{background:#1e2127 !important;border-color:#33232c !important;box-shadow:none !important;}
+                .su-panel-head,.su-label{color:#c9cdd4;}
+                .su-hint,.su-sub,.su-foot,.su-panel-count{color:#8a9099;}
+                .su-hero{background:linear-gradient(120deg,#5c2340 0%,#401a2e 100%) !important;}
+                .su-act{border-color:#d36ba6 !important;color:#f0b6d3 !important;}
+                .su-notice{background:#1e2127 !important;border-color:#33232c !important;color:#c9cdd4;}
             }
-            .su-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
-            .su-head-main{flex:1 1 auto;min-width:0;}
-            .su-title{font-size:19px;font-weight:700;letter-spacing:.2px;}
-            .su-sub{font-size:12px;color:var(--su-text-sub);margin-top:3px;}
-            .su-meta{flex:0 0 auto;font-size:11px;color:var(--su-text-sub);
-                padding:3px 9px;border-radius:999px;background:var(--su-bg-soft);
-                border:1px solid var(--su-border);white-space:nowrap;}
+            .su-title{font-size:13px;font-weight:600;color:var(--su-sub);margin-bottom:8px;letter-spacing:.4px;}
+            .su-hero{
+                position:relative;overflow:hidden;border-radius:12px;padding:14px 16px;margin-bottom:16px;
+                background:linear-gradient(120deg,#eb2f96 0%,#f759ab 60%,#ff9ad5 100%);
+                color:#fff;box-shadow:0 4px 14px rgba(235,47,150,0.20);
+            }
+            .su-hero::before{
+                content:"";position:absolute;right:-30px;top:-40px;width:140px;height:140px;border-radius:50%;
+                background:rgba(255,255,255,0.10);
+            }
+            .su-hero-title{font-size:15px;font-weight:700;position:relative;z-index:1;}
+            .su-hero-sub{font-size:12px;opacity:.92;margin-top:4px;line-height:1.6;position:relative;z-index:1;}
+            .su-hero-chain{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;position:relative;z-index:1;}
+            .su-node{
+                font-size:11px;padding:2px 9px;border-radius:999px;
+                background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.28);
+            }
+            .su-arrow{font-size:11px;opacity:.7;}
+
             .su-search{margin-bottom:12px;}
             .su-actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px;}
-            .su-act{font-size:12px;padding:4px 14px;border-radius:999px;cursor:pointer;
-                font-family:inherit;font-weight:600;
-                border:1px solid var(--su-accent);background:transparent;color:var(--su-accent);
-                transition:background .15s ease,color .15s ease;}
-            .su-act:hover{background:var(--su-accent);color:#fff;}
-            .su-notice{margin:0 0 12px;padding:10px 12px;border-radius:10px;
-                max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;
-                font-size:11.5px;line-height:1.7;background:var(--su-bg-soft);
-                border:1px solid var(--su-border);
-                font-family:ui-monospace,Consolas,"Cascadia Mono",monospace;}
-            .su-card{margin-bottom:10px;border:1px solid var(--su-border);border-radius:var(--su-radius);
-                background:var(--su-bg);overflow:hidden;transition:box-shadow .18s ease;}
-            .su-card-open{box-shadow:0 1px 2px rgba(15,23,42,.05);}
-            .su-card-head{display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;
-                border:0;background:var(--su-bg-soft);color:inherit;font:inherit;font-weight:600;
-                cursor:pointer;text-align:left;}
-            .su-card-head:hover{background:var(--su-bg);}
-            .su-caret{width:12px;color:var(--su-accent);font-size:11px;}
-            .su-card-name{flex:1 1 auto;}
-            .su-card-count{font-size:11px;font-weight:500;color:var(--su-text-sub);
-                padding:1px 7px;border-radius:999px;background:var(--su-bg);
-                border:1px solid var(--su-border);}
-            .su-card-body{padding:4px 14px 12px;}
-            .su-row{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:14px;
-                align-items:start;padding:9px 0;border-bottom:1px dashed var(--su-border);}
+            .su-act{
+                font-size:12px;padding:4px 14px;border-radius:999px;cursor:pointer;font-family:inherit;font-weight:600;
+                border:1px solid var(--su-pink);background:transparent;color:var(--su-pink);
+                transition:background .15s ease,color .15s ease;
+            }
+            .su-act:hover{background:linear-gradient(120deg,var(--su-pink) 0%,var(--su-pink-soft) 100%);color:#fff;border-color:transparent;}
+            .su-notice{
+                margin:0 0 12px;padding:10px 12px;border-radius:10px;max-height:260px;overflow:auto;
+                white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.7;
+                background:#fff;border:1px solid var(--su-border);
+                font-family:ui-monospace,Consolas,"Cascadia Mono",monospace;
+            }
+
+            .su-panel{
+                position:relative;margin-bottom:16px;padding:14px 16px 8px 18px;
+                border:1px solid var(--su-border);border-radius:10px;background:var(--su-panel);
+                box-shadow:0 2px 8px rgba(114,46,209,0.05);
+            }
+            .su-panel::before{
+                content:"";position:absolute;left:0;top:0;bottom:0;width:4px;
+                background:linear-gradient(180deg,var(--su-pink-soft),var(--su-pink));
+                border-radius:10px 0 0 10px;
+            }
+            .su-panel-collapsed{padding-bottom:14px;}
+            .su-panel-head{
+                display:flex;align-items:center;gap:8px;width:100%;padding:0;margin:0 0 10px;
+                border:0;background:transparent;color:var(--su-text);font:inherit;font-size:14px;font-weight:600;
+                cursor:pointer;text-align:left;
+            }
+            .su-panel-collapsed .su-panel-head{margin-bottom:0;}
+            .su-panel-dot{
+                width:8px;height:8px;border-radius:50%;background:var(--su-pink);
+                box-shadow:0 0 0 3px rgba(235,47,150,0.14);flex:0 0 auto;
+            }
+            .su-panel-name{flex:1 1 auto;}
+            .su-panel-count{
+                font-size:11px;font-weight:500;color:var(--su-sub);padding:1px 7px;border-radius:999px;
+                background:#fff;border:1px solid var(--su-border);
+            }
+            .su-caret{font-size:10px;color:var(--su-pink);opacity:.85;}
+            .su-panel-body{padding-top:2px;}
+
+            .su-row{
+                display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:14px;
+                align-items:start;padding:9px 0;border-bottom:1px dashed #f0ebf7;
+            }
             .su-row:last-child{border-bottom:0;}
             .su-row-bool{grid-template-columns:minmax(0,1fr) auto;align-items:center;}
+            .su-row-wide{grid-template-columns:minmax(0,1fr);gap:6px;}
+            .su-row-wide .su-ctl{flex-direction:column;align-items:stretch;gap:8px;}
             .su-row-text{min-width:0;}
-            .su-label{font-weight:600;font-size:12.5px;}
+            .su-label{font-weight:600;font-size:12.5px;color:var(--su-text);}
             .su-row-bool .su-label{font-weight:500;}
-            .su-hint{font-size:11px;color:var(--su-text-sub);margin-top:2px;line-height:1.55;
-                display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+            .su-hint{
+                font-size:11px;color:var(--su-sub);margin-top:2px;line-height:1.55;
+                display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;
+            }
             .su-row:hover .su-hint{-webkit-line-clamp:unset;}
             .su-ctl{display:flex;align-items:center;justify-content:flex-end;}
             .su-ctl>*{width:100%;}
             .su-row-bool .su-ctl>*{width:auto;}
-            .su-empty{padding:26px 0;text-align:center;font-size:12px;color:var(--su-text-sub);}
-            .su-foot{margin-top:10px;font-size:11px;color:var(--su-text-sub);}
-            .su-unsupported{font-size:11px;color:var(--su-text-sub);}
+            .su-textarea{
+                width:100%;box-sizing:border-box;resize:vertical;min-height:150px;
+                font-family:inherit;font-size:12px;line-height:1.65;padding:8px 10px;border-radius:10px;
+                border:1px solid #f7d6e6;background:linear-gradient(180deg,#fff 0%,#fffafd 100%);
+                color:inherit;outline:none;
+            }
+            .su-textarea:focus{border-color:#f759ab;box-shadow:0 0 0 3px rgba(247,89,171,0.18);}
+            .su-root .ant-input,.su-root .ant-input-number{
+                width:100%;border-radius:10px !important;border:1px solid #f7d6e6 !important;
+                background:linear-gradient(180deg,#fff 0%,#fffafd 100%) !important;
+                box-shadow:0 1px 4px rgba(235,47,150,0.06),inset 0 1px 0 rgba(255,255,255,0.8) !important;
+            }
+            .su-root .ant-input:hover,.su-root .ant-input-number:hover{border-color:#ffadd2 !important;}
+            .su-root .ant-input:focus,.su-root .ant-input-number-focused{
+                border-color:#f759ab !important;box-shadow:0 0 0 3px rgba(247,89,171,0.18) !important;
+            }
+            .su-empty{padding:26px 0;text-align:center;font-size:12px;color:var(--su-sub);}
+            .su-foot{margin-top:10px;font-size:11px;color:var(--su-sub);}
+            .su-unsupported{font-size:11px;color:var(--su-sub);}
             """);
         b.CloseElement();
     }
+}
+
+/// <summary>标在字符串配置项上：用多行文本框渲染（提示词、文案这类长文本）。</summary>
+public sealed class UiTextAreaAttribute : Attribute
+{
 }
