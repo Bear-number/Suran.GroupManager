@@ -13,6 +13,6 @@ public sealed class GroupManagerUI : ModuleUIBase<GroupManagerModule, GroupManag
             b.AddContent(0, "配置未加载");
             return;
         }
-        SuranUiKit.Render(this, StateHasChanged, b, Configuration, "群聊管家", "禁言、踢人、名片、撤回、公告与成员变动；高危功能各有独立开关", "#8b5cf6");
+        SuranUiKit.Render(this, StateHasChanged, b, Configuration, "群聊管家", "禁言、踢人、名片、撤回、公告与成员变动；高危功能各有独立开关");
     }
 }

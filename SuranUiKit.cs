@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
@@ -13,7 +13,7 @@ using Microsoft.AspNetCore.Components.Web;
 namespace Suran.GroupManager;
 
 /// <summary>
-/// 通用配置界面，外观对齐 EmotionTTS 那一页（gs- 皮肤：紫色 hero + 左侧色条分区 + 统一控件）。
+/// 通用配置界面，外观对齐 EmotionTTS 那一页（gs- 皮肤：粉色渐变 hero + 左侧色条分区 + 统一控件）。
 ///
 /// 这些插件的配置项命名一直是「分组·名称」（`检索·默认返回条数`、`网络·代理地址`），
 /// 说明文字又都写在 Description 里、动辄两三百字。所以这里仍然按 `·` 自动分组，
@@ -52,7 +52,7 @@ public static class SuranUiKit
     }
 
     public static void Render(ComponentBase host, Action refresh, RenderTreeBuilder b, object config,
-        string title, string subtitle, string accent,
+        string title, string subtitle,
         IReadOnlyList<UiAction>? actions = null, string? notice = null,
         Action<RenderTreeBuilder, int, string>? rowTail = null)
     {
@@ -60,7 +60,7 @@ public static class SuranUiKit
         int i = 0;
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "su-root");
-        b.AddAttribute(i++, "style", "--su-accent:" + accent + ";--su-pink:#eb2f96;--su-pink-soft:#f759ab;");
+        b.AddAttribute(i++, "style", "--su-pink:#eb2f96;--su-pink-soft:#f759ab;");
 
         InjectStyles(b, ref i);
 
@@ -433,7 +433,6 @@ public static class SuranUiKit
         b.OpenElement(i++, "style");
         b.AddContent(i++, """
             .su-root{
-                --su-accent:#eb2f96;
                 --su-pink:#eb2f96;
                 --su-pink-soft:#f759ab;
                 --su-border:#f7e0ec;
