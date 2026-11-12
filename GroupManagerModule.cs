@@ -89,6 +89,52 @@ public class GroupManagerConfig
     [Description("占位符 {nickname} 和 {user_id} 会被替换")]
     public string WelcomeTemplate { get; set; } = "欢迎 {nickname} 加入本群～";
 
+    [DisplayName("欢迎·按群模板")]
+    [UiTextArea]
+    [Description("多行，每行「群号=模板」，如 123456=欢迎 {nickname} 加入二群～。占位符 {nickname}/{user_id}；命中优先于全局模板，某行解析失败就回退全局模板")]
+    public string WelcomeGroupTemplates { get; set; } = "";
+
+    [DisplayName("欢迎·延迟秒")]
+    [Description("新人入群后延迟多少秒发欢迎语，0=立即发，最多60秒")]
+    public int WelcomeDelaySeconds { get; set; } = 0;
+
+    [DisplayName("欢迎·@新人")]
+    [Description("开启后在欢迎语前 @ 新人，默认关（部分协议端 at 段可能不生效）")]
+    public bool WelcomeAtNewcomer { get; set; } = false;
+
+    // ---- 成员变动记录 / 反刷屏 ----
+    [DisplayName("成员变动·记录")]
+    [Description("把入群/退群/被踢记录追加到本地 jsonl，供 QueryMemberChanges 查询；只写本机，不依赖协议端，默认开")]
+    public bool MemberChangeLog { get; set; } = true;
+
+    [DisplayName("反刷屏·启用")]
+    [Description("默认关。开启后按重复阈值/关键词/链接检查群消息；动作默认 observe，只写日志不改群")]
+    public bool AntiSpamEnabled { get; set; } = false;
+
+    [DisplayName("反刷屏·群号")]
+    [Description("只对这些群生效，英文或中文逗号分隔；留空=所有群")]
+    public string AntiSpamGroups { get; set; } = "";
+
+    [DisplayName("反刷屏·重复阈值")]
+    [Description("同一用户10秒内重复发送相同内容达到该次数即命中，默认5；设0关闭重复检测")]
+    public int AntiSpamRepeatThreshold { get; set; } = 5;
+
+    [DisplayName("反刷屏·动作")]
+    [Description("observe=只写日志（默认）/ recall=撤回当前消息 / mute=禁言。填错一律按 observe 处理")]
+    public string AntiSpamAction { get; set; } = "observe";
+
+    [DisplayName("反刷屏·禁言秒数")]
+    [Description("动作=mute 时的禁言时长，默认600秒；小于60按60处理")]
+    public int AntiSpamMuteSeconds { get; set; } = 600;
+
+    [DisplayName("反刷屏·关键词")]
+    [Description("命中任一关键词即触发，英文或中文逗号分隔；留空=不检测。日志只记命中类型与正文长度，不打印正文")]
+    public string AntiSpamKeywords { get; set; } = "";
+
+    [DisplayName("反刷屏·屏蔽链接")]
+    [Description("开启后消息里出现 http/https/www 等链接即触发，默认关")]
+    public bool AntiSpamBlockLinks { get; set; } = false;
+
     // ---- 加群申请 ----
     [DisplayName("加群·启用申请处理")]
     [Description("是否定时轮询待处理的加群申请。")]
@@ -111,7 +157,7 @@ public class GroupManagerConfig
     "QQ群管理：禁言/踢人/名片/撤回/成员查询/公告/精华/头衔/加群申请/成员变动感知，高危功能均有独立开关",
     defaultCategory: "苏染的工具/QQ与群管理",
     EditorUI = typeof(GroupManagerUI))]
-public class GroupManagerModule(
+public partial class GroupManagerModule(
     XmlFunctionCaller functionCaller,
     ILogger<GroupManagerModule> logger,
     Interactor<GroupManagerModule> interactor
@@ -205,8 +251,8 @@ public class GroupManagerModule(
     {
         XmlHandler handler = new(this)
         {
-            Description = "QQ群管理工具集：禁言/解禁/名片/撤回/成员查询/公告/精华/头衔/加群申请/询问主人，高危功能与可选功能受配置开关控制。",
-            Explanation = "管理操作需要Bot是群管理员。operatorId 填发起操作的用户QQ号（从消息上下文获取），自主决策填 system。可选功能（踢人/全员禁言/公告/精华/头衔/加群申请）默认关闭，需在模块配置中开启。"
+            Description = "QQ群管理工具集：禁言/解禁/名片/撤回/成员与群资料查询/禁言名单/管理员设置/批量禁言踢人/群名/公告/精华/头衔/加群申请/成员变动与操作日志/询问主人，高危功能与可选功能受配置开关控制。",
+            Explanation = "管理操作需要Bot是群管理员。operatorId 填发起操作的用户QQ号（从消息上下文获取），自主决策填 system。可选功能（踢人/全员禁言/公告/精华/头衔/加群申请）默认关闭，需在模块配置中开启。批量操作沿用同一套权限与高危开关；反刷屏默认关闭且默认只观察不操作。"
         };
         functionCaller.RegisterHandler(handler,
             (Configuration?.DocumentAlwaysResident ?? false) ? DocumentMode.Explicit : DocumentMode.Implicit,
@@ -269,6 +315,11 @@ public class GroupManagerModule(
             joinPollUnsupported = false;
             groupNameCache.Clear();
             providerName = "";
+            // 反刷屏/消息缓存是静态的，热重载后重新积累，避免旧角色数据串进来
+            messageCache.Clear();
+            spamWindows.Clear();
+            cachedSelfId = 0;
+            selfIdResolved = false;
         }
         finally
         {
@@ -375,8 +426,21 @@ public class GroupManagerModule(
         }
 
         if (messageElement.TryGetProperty("post_type", out JsonElement postType) == false
-            || postType.ValueKind != JsonValueKind.String
-            || postType.GetString() != "notice")
+            || postType.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+        string postKind = postType.GetString() ?? "";
+
+        // 群消息：只为反刷屏与「撤回该用户最近消息」留存元数据，不缓存正文
+        if (postKind == "message")
+        {
+            JsonElement messageData = messageElement.Clone();
+            _ = Task.Run(() => HandleGroupMessageEventAsync(messageData));
+            return;
+        }
+
+        if (postKind != "notice")
         {
             return;
         }
@@ -548,7 +612,7 @@ public class GroupManagerModule(
         return adminIds.Contains(trimmed);
     }
 
-    void LogOperation(string operation, string operatorId, string target, string result)
+    void LogOperation(string operation, string operatorId, string target, string result, long groupId = 0)
     {
         if (Configuration.LogOperations == false)
         {
@@ -557,6 +621,26 @@ public class GroupManagerModule(
         string targetPart = target.Length > 0 ? "，目标: " + target : "";
         logger.LogInformation("[群管] {Operation} | 操作者: {Operator}{Target} | 结果: {Result}",
             operation, operatorId, targetPart, result);
+
+        // 原日志只进 ILogger，没有可解析的文件；这里额外追加同内容的 jsonl，供 QueryOperationLog 查询，
+        // 不改变上面那行文本日志的格式与位置
+        try
+        {
+            JsonObject record = new()
+            {
+                ["time"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                ["group_id"] = groupId,
+                ["operation"] = operation,
+                ["operator"] = operatorId,
+                ["target"] = target,
+                ["result"] = result
+            };
+            AppendJsonLine("operation-log.jsonl", record.ToJsonString());
+        }
+        catch (Exception logError)
+        {
+            logger.LogWarning("[群管] 写操作日志文件失败：{Message}", logError.Message);
+        }
     }
 
     // 开关检查：功能关闭时向AI说明并返回 true（调用方据此直接返回）
@@ -627,16 +711,26 @@ public class GroupManagerModule(
         }
         string nickname = await LookupNicknameAsync(groupId, userId);
         string display = nickname.Length > 0 ? nickname + "(" + userId + ")" : userId.ToString();
+        AppendMemberChange(groupId, userId, nickname, "join", 0);
 
         if (Configuration.EnableWelcome)
         {
-            string welcome = Configuration.WelcomeTemplate
+            string welcome = ResolveWelcomeTemplate(groupId)
                 .Replace("{nickname}", nickname.Length > 0 ? nickname : userId.ToString())
                 .Replace("{user_id}", userId.ToString());
             try
             {
-                await SendGroupTextAsync(groupId, welcome);
-                LogOperation("入群欢迎", "system", userId.ToString(), "成功");
+                int delaySeconds = Math.Clamp(Configuration.WelcomeDelaySeconds, 0, 60);
+                if (delaySeconds > 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), DestroyCancellationToken);
+                }
+                await SendGroupWelcomeAsync(groupId, userId, welcome, Configuration.WelcomeAtNewcomer);
+                LogOperation("入群欢迎", "system", userId.ToString(), "成功", groupId);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
             }
             catch (Exception welcomeError)
             {
@@ -652,7 +746,9 @@ public class GroupManagerModule(
 
     async Task HandleGroupDecreaseAsync(JsonElement notice)
     {
-        if (Configuration.EnablePresenceNotice == false)
+        // 成员变动记录与本地的「感知·启用退群感知」相互独立：记录开着就要写，不往对话注入
+        bool recordChange = Configuration.MemberChangeLog;
+        if (recordChange == false && Configuration.EnablePresenceNotice == false)
         {
             return;
         }
@@ -663,7 +759,18 @@ public class GroupManagerModule(
             ? subElement.GetString() ?? ""
             : "";
 
-        string userDisplay = await FormatUserDisplayAsync(groupId, userId);
+        string nickname = await LookupNicknameAsync(groupId, userId);
+        if (recordChange)
+        {
+            bool kicked = subType is "kick" or "kick_me";
+            AppendMemberChange(groupId, userId, nickname, kicked ? "kick" : "leave", operatorId);
+        }
+        if (Configuration.EnablePresenceNotice == false)
+        {
+            return;
+        }
+
+        string userDisplay = nickname.Length > 0 ? nickname + "(" + userId + ")" : userId.ToString();
         string groupText = await FormatGroupDisplayAsync(groupId);
         string text;
         if (subType == "kick_me")
