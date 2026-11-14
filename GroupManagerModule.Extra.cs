@@ -371,7 +371,7 @@ public partial class GroupManagerModule
     {
         lock (messageCacheLock)
         {
-            if (messageCache.TryGetValue(groupId, out Queue<CachedMessage>? queue) == false)
+            if (messageCache.TryGetValue(groupId, out Queue<CachedMessage> queue) == false)
             {
                 if (messageCache.Count >= MaxCachedGroups)
                 {
@@ -392,7 +392,7 @@ public partial class GroupManagerModule
     {
         lock (messageCacheLock)
         {
-            return messageCache.TryGetValue(groupId, out Queue<CachedMessage>? queue)
+            return messageCache.TryGetValue(groupId, out Queue<CachedMessage> queue)
                 ? queue.ToList()
                 : new List<CachedMessage>();
         }
@@ -490,7 +490,7 @@ public partial class GroupManagerModule
     [Description("获取群资料：群名、群号、成员数/上限、群主、管理员列表（昵称+QQ）、是否全员禁言。协议端没返回的字段标注未知，不做猜测")]
     public async Task GetGroupDetail(
         [Description("群号")] long groupId,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -611,7 +611,7 @@ public partial class GroupManagerModule
     [Description("查看当前禁言名单（QQ、昵称、剩余秒数）。优先用 NapCat 的 get_group_shut_list；协议端不支持时改用成员列表的禁言字段并说明")]
     public async Task ListMutedMembers(
         [Description("群号")] long groupId,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -767,7 +767,7 @@ public partial class GroupManagerModule
         [Description("群号")] long groupId,
         [Description("目标QQ号")] long userId,
         [Description("true=设为管理员，false=取消管理员，默认true")] bool enable = true,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -806,7 +806,7 @@ public partial class GroupManagerModule
         [Description("群号")] long groupId,
         [Description("要禁言的QQ号，英文或中文逗号分隔")] string userIds,
         [Description("每人禁言秒数，默认600")] int durationSeconds = 600,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -874,7 +874,7 @@ public partial class GroupManagerModule
         [Description("群号")] long groupId,
         [Description("要踢出的QQ号，英文或中文逗号分隔")] string userIds,
         [Description("是否同时拒绝这些用户的加群申请，默认否")] bool rejectAddRequest = false,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (Gate(Configuration.EnableKick, "踢人"))
         {
@@ -943,7 +943,7 @@ public partial class GroupManagerModule
     [Description("解除本群全部禁言：先取禁言名单再逐个解除，报告成功数与失败项；取不到名单时说明原因")]
     public async Task UnbanAllMembers(
         [Description("群号")] long groupId,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -1019,7 +1019,7 @@ public partial class GroupManagerModule
     public async Task SetGroupName(
         [Description("群号")] long groupId,
         [Description("新的群名，最多30字")] string name,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -1065,7 +1065,7 @@ public partial class GroupManagerModule
         [Description("群号")] long groupId,
         [Description("目标QQ号")] long userId,
         [Description("最多撤回最近几条，默认1，最多20")] int count = 1,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -1140,10 +1140,10 @@ public partial class GroupManagerModule
     [XmlFunction(FunctionMode.OneShot, "query_member_changes")]
     [Description("查入群/退群/被踢记录（本地 jsonl，只写本机不依赖协议端）。groupId 留空查所有群，days 默认7，limit 默认30")]
     public Task QueryMemberChanges(
-        [Description("群号，留空=所有群")] string? groupId = "",
+        [Description("群号，留空=所有群")] string groupId = "",
         [Description("查最近几天，默认7")] int days = 7,
         [Description("最多返回几条，默认30")] int limit = 30,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -1217,11 +1217,11 @@ public partial class GroupManagerModule
     [XmlFunction(FunctionMode.OneShot, "query_operation_log")]
     [Description("查群管操作日志（本地 jsonl，与运行日志同内容）。groupId 留空查所有群，days 默认7，keyword 匹配操作/操作者/目标/结果，limit 默认30")]
     public Task QueryOperationLog(
-        [Description("群号，留空=所有群")] string? groupId = "",
+        [Description("群号，留空=所有群")] string groupId = "",
         [Description("查最近几天，默认7")] int days = 7,
-        [Description("可选关键词")] string? keyword = "",
+        [Description("可选关键词")] string keyword = "",
         [Description("最多返回几条，默认30")] int limit = 30,
-        [Description("发起操作的用户QQ号，自主决策填system")] string? operatorId = "system")
+        [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
         {
@@ -1305,7 +1305,7 @@ public partial class GroupManagerModule
     // 小工具
     // ============================================================
 
-    static List<long> ParseIdList(string? raw)
+    static List<long> ParseIdList(string raw)
     {
         return (raw ?? "")
             .Split(new[] { ',', '，', ';', '；', ' ', '\r', '\n' },
@@ -1316,7 +1316,7 @@ public partial class GroupManagerModule
             .ToList();
     }
 
-    static List<string> ParseKeywordList(string? raw)
+    static List<string> ParseKeywordList(string raw)
     {
         return (raw ?? "")
             .Split(new[] { ',', '，', ';', '；', '\r', '\n' },
