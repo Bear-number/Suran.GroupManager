@@ -15,6 +15,7 @@ using Alife.Function.FunctionCaller;
 using Alife.Foundation;
 using Alife.Framework;
 using Microsoft.Extensions.Logging;
+using Suran.QChat;
 
 namespace Suran.GroupManager;
 
@@ -23,15 +24,6 @@ public class GroupManagerConfig
     [DisplayName("运行·功能文档常驻")]
     [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是主人明确下令时用，默认关")]
     public bool DocumentAlwaysResident { get; set; } = false;
-
-    // ---- 连接 ----
-    [DisplayName("基础·协议端地址")]
-    [Description("留空 = 自动跟随「QQ 聊天」插件的配置（推荐）。填了就用这里的，例如 ws://127.0.0.1:3001")]
-    public string OneBotWsUrl { get; set; } = "";
-
-    [DisplayName("基础·访问令牌")]
-    [Description("与协议端配置的 token 一致。留空 = 跟随「QQ 聊天」插件。填了地址却没填这里，协议端一开 token 就会连不上")]
-    public string OneBotToken { get; set; } = "";
 
     // ---- 权限与日志 ----
     [DisplayName("权限·管理员QQ列表")]
@@ -160,34 +152,23 @@ public class GroupManagerConfig
 public partial class GroupManagerModule(
     XmlFunctionCaller functionCaller,
     ILogger<GroupManagerModule> logger,
-    Interactor<GroupManagerModule> interactor
+    Interactor<GroupManagerModule> interactor,
+    QChatService? qchatService = null
 ) : ChatBehaviour, IConfigurable<GroupManagerConfig>
 {
     public GroupManagerConfig Configuration { get; set; } = null!;
 
     /// <summary>
-    /// 协议端连接信息。
-    ///
-    /// 地址留空时跟随「QQ 聊天」插件的配置——那是唯一值得人填一次的地方。
-    /// 换端口、给协议端开 token，都不用回来改这个插件，读它的配置就够。
-    /// 读不到就退回上一个版本的默认值，行为和以前完全一致。
+    /// 只读 QQ聊天增强 的配置取第一个账号地址，用于日志说明共用哪条连接；连接本身由 QChat 建立。
     /// </summary>
-    (string Url, string Token, string Source) ResolveOneBot()
+    (string Url, string Token) ResolveOneBot()
     {
-        string url = (Configuration.OneBotWsUrl ?? "").Trim();
-        string token = (Configuration.OneBotToken ?? "").Trim();
-
-        if (url.Length > 0)
-            return (url, token, "本插件");
-
-        // 按角色存，所以换角色读的是那个角色自己的 QQ 配置——不同角色可能是不同 bot 账号，这是对的。
-        // 第二条是兜底：StorageFolderPath 若已含角色层、或 StorageKey 为空，靠第一条拼不出来。
         string[] candidates =
         [
             Path.Combine(AlifePath.StorageFolderPath, Character.StorageKey,
-                "Configuration", "Alife.Function.QChat.QChatService.json"),
+                "Configuration", "Suran.QChat.QChatService.json"),
             Path.Combine(AlifePath.StorageFolderPath,
-                "Configuration", "Alife.Function.QChat.QChatService.json"),
+                "Configuration", "Suran.QChat.QChatService.json"),
         ];
 
         foreach (string path in candidates)
@@ -198,41 +179,59 @@ public partial class GroupManagerModule(
                     continue;
 
                 using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
-                string sharedUrl = document.RootElement.TryGetProperty("Url", out JsonElement u) ? u.GetString() ?? "" : "";
-                string sharedToken = document.RootElement.TryGetProperty("Token", out JsonElement t) ? t.GetString() ?? "" : "";
-                if (sharedUrl.Trim().Length > 0)
-                    return (sharedUrl.Trim(), token.Length > 0 ? token : sharedToken.Trim(), "QQ 聊天插件");
+                JsonElement root = document.RootElement;
+                JsonElement first = default;
+                if (root.TryGetProperty("Accounts", out JsonElement accounts)
+                    && accounts.ValueKind == JsonValueKind.Array && accounts.GetArrayLength() > 0)
+                {
+                    first = accounts[0];
+                }
+                string url = ReadText(first, "Url");
+                string token = ReadText(first, "Token");
+                if (url.Length == 0)
+                {
+                    url = ReadText(root, "Url");
+                    token = ReadText(root, "Token");
+                }
+                if (url.Length > 0)
+                    return (url, token);
             }
             catch (Exception)
             {
-                // 这个候选读不了就试下一个。配置坏了也不该让发消息失败在读取配置上
+                // 读不到只影响日志显示，不影响连接
             }
         }
 
-        return ("ws://127.0.0.1:3001", token, "默认");
+        return ("", "");
     }
 
-    /// <summary>
-    /// 建连并鉴权。
-    /// token 必须在 ConnectAsync 之前写进请求头——连上之后 ClientWebSocket 不允许再改 Options。
-    /// </summary>
-    async Task ConnectOneBotAsync(ClientWebSocket connection, CancellationToken cancellationToken)
-    {
-        (string url, string token, _) = ResolveOneBot();
-        if (token.Length > 0)
-            connection.Options.SetRequestHeader("Authorization", "Bearer " + token);
-        await connection.ConnectAsync(new Uri(url), cancellationToken);
-    }
+    static string ReadText(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out JsonElement value)
+            ? (value.GetString() ?? "").Trim()
+            : "";
 
-
-    // ---- 连接层私有字段 ----
-    static readonly SemaphoreSlim sendLock = new(1, 1);
-    static readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingResponses = new();
     static string providerName = "";
-    static ClientWebSocket sharedConnection;
-    static TaskCompletionSource<bool> connectionReady = CreateReadySource();
+    OneBotClient? subscribedClient;
 
-    static bool receiveLoopStarted;
+    void SubscribePrimary()
+    {
+        OneBotClient? client = qchatService?.PrimaryClient;
+        if (ReferenceEquals(subscribedClient, client))
+            return;
+        if (subscribedClient != null)
+            subscribedClient.EventReceived -= OnSharedEvent;
+        subscribedClient = client;
+        if (subscribedClient != null)
+            subscribedClient.EventReceived += OnSharedEvent;
+    }
+
+    void OnSharedEvent(OneBotBaseEvent ev)
+    {
+        if (ev.RawJson is { Length: > 0 } raw)
+            _ = Task.Run(() => DispatchMessageAsync(raw));
+    }
+
+    void OnPrimaryChanged(OneBotClient? _) => SubscribePrimary();
 
     // ---- 实例私有字段 ----
     DateTime lastJoinPollTime = DateTime.MinValue;
@@ -262,7 +261,13 @@ public partial class GroupManagerModule(
 
     protected override Task OnStart()
     {
-        StartReceiveLoop();
+        SubscribePrimary();
+        if (qchatService != null)
+            qchatService.PrimaryClientChanged += OnPrimaryChanged;
+        if (subscribedClient == null)
+            logger.LogWarning("群聊管家没拿到 QQ聊天增强 的连接：启用 Suran.QChat 并配好账号后重载角色");
+        else
+            logger.LogInformation("群聊管家共用 QQ聊天增强 的连接：{Url}", ResolveOneBot().Url);
         StartProviderCheck();
         if (Configuration.AutoCheckAdmin)
         {
@@ -301,105 +306,31 @@ public partial class GroupManagerModule(
         }
     }
 
-    protected override async Task OnDestroy()
+    protected override Task OnDestroy()
     {
-        // 断开协议端连接并清理挂起请求，热重载不泄漏
-        await sendLock.WaitAsync();
-        try
+        // 连接归 QChat 管，这里只退订；清掉本插件的静态缓存，避免热重载后旧角色数据串进来
+        if (qchatService != null)
+            qchatService.PrimaryClientChanged -= OnPrimaryChanged;
+        if (subscribedClient != null)
         {
-            sharedConnection?.Dispose();
-            sharedConnection = null;
-            pendingResponses.Clear();
-            receiveLoopStarted = false;
-            joinBaselineRecorded = false;
-            joinPollUnsupported = false;
-            groupNameCache.Clear();
-            providerName = "";
-            // 反刷屏/消息缓存是静态的，热重载后重新积累，避免旧角色数据串进来
-            messageCache.Clear();
-            spamWindows.Clear();
-            cachedSelfId = 0;
-            selfIdResolved = false;
+            subscribedClient.EventReceived -= OnSharedEvent;
+            subscribedClient = null;
         }
-        finally
-        {
-            sendLock.Release();
-        }
+        joinBaselineRecorded = false;
+        joinPollUnsupported = false;
+        groupNameCache.Clear();
+        providerName = "";
+        messageCache.Clear();
+        spamWindows.Clear();
+        cachedSelfId = 0;
+        selfIdResolved = false;
         logger.LogInformation("群聊管家已卸载");
+        return Task.CompletedTask;
     }
 
     // ============================================================
-    // OneBot 连接层：常驻接收循环统一处理响应与事件
+    // OneBot 事件处理：连接与 echo 配对都由 QQ聊天增强 负责，这里只消费事件
     // ============================================================
-
-    static TaskCompletionSource<bool> CreateReadySource()
-    {
-        TaskCompletionSource<bool> source = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        return source;
-    }
-
-    void StartReceiveLoop()
-    {
-        if (receiveLoopStarted)
-        {
-            return;
-        }
-        receiveLoopStarted = true;
-        Task.Run(async () =>
-        {
-            while (DestroyCancellationToken.IsCancellationRequested == false)
-            {
-                try
-                {
-                    sharedConnection?.Dispose();
-                    ClientWebSocket connection = new();
-                    using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-                    await ConnectOneBotAsync(connection, connectTimeout.Token);
-                    sharedConnection = connection;
-                    connectionReady.TrySetResult(true);
-                    logger.LogInformation("协议端已连接：{Url}", ResolveOneBot().Url);
-                    await ReceiveLoopCoreAsync(connection);
-                }
-                catch (Exception loopError)
-                {
-                    logger.LogWarning("协议端连接中断，3秒后重连：{Message}", loopError.Message);
-                }
-                connectionReady = CreateReadySource();
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(3), DestroyCancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
-            }
-        }, DestroyCancellationToken);
-    }
-
-    async Task ReceiveLoopCoreAsync(ClientWebSocket connection)
-    {
-        byte[] receiveBuffer = new byte[1024 * 1024];
-        while (DestroyCancellationToken.IsCancellationRequested == false)
-        {
-            MemoryStream messageStream = new();
-            WebSocketReceiveResult receiveResult;
-            do
-            {
-                receiveResult = await connection.ReceiveAsync(
-                    new ArraySegment<byte>(receiveBuffer), DestroyCancellationToken);
-                if (receiveResult.MessageType == WebSocketMessageType.Close)
-                {
-                    throw new Exception("协议端主动断开连接");
-                }
-                messageStream.Write(receiveBuffer, 0, receiveResult.Count);
-            }
-            while (receiveResult.EndOfMessage == false);
-
-            string messageText = Encoding.UTF8.GetString(messageStream.ToArray());
-            await DispatchMessageAsync(messageText);
-        }
-    }
 
     async Task DispatchMessageAsync(string messageText)
     {
@@ -411,17 +342,6 @@ public partial class GroupManagerModule(
         }
         catch
         {
-            return;
-        }
-
-        // 带 echo 的是动作响应，完成挂起的调用；不带 echo 的是事件推送
-        if (messageElement.TryGetProperty("echo", out JsonElement echoElement) && echoElement.ValueKind == JsonValueKind.String)
-        {
-            string echo = echoElement.GetString() ?? "";
-            if (pendingResponses.TryRemove(echo, out TaskCompletionSource<string> waiter))
-            {
-                waiter.TrySetResult(messageText);
-            }
             return;
         }
 
@@ -480,53 +400,14 @@ public partial class GroupManagerModule(
         }
     }
 
-    // 发送动作并等待响应，返回原始响应JSON字符串
+    // 发送动作并等待响应，返回原始响应 JSON；连接与 echo 配对交给 QQ聊天增强
     async Task<string> CallActionAsync(string action, JsonObject parameters)
     {
-        await connectionReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
-        string echo = Guid.NewGuid().ToString("N");
-        TaskCompletionSource<string> waiter = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingResponses[echo] = waiter;
-
-        await sendLock.WaitAsync();
-        try
-        {
-            if (sharedConnection == null || sharedConnection.State != WebSocketState.Open)
-            {
-                connectionReady = CreateReadySource();
-                sharedConnection?.Dispose();
-                ClientWebSocket connection = new();
-                using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-                await ConnectOneBotAsync(connection, connectTimeout.Token);
-                sharedConnection = connection;
-                connectionReady.TrySetResult(true);
-            }
-
-            // 参数对象可能被多次复用（双动作重试等），必须深拷贝后再挂到请求包，
-            // 否则第二次挂载会抛 "The node already has a parent"
-            JsonObject payload = new()
-            {
-                ["action"] = action,
-                ["params"] = parameters.DeepClone(),
-                ["echo"] = echo
-            };
-            byte[] payloadBytes = Encoding.UTF8.GetBytes(payload.ToJsonString());
-            using CancellationTokenSource sendTimeout = new(TimeSpan.FromSeconds(15));
-            await sharedConnection.SendAsync(
-                new ArraySegment<byte>(payloadBytes), WebSocketMessageType.Text, true, sendTimeout.Token);
-        }
-        catch
-        {
-            pendingResponses.TryRemove(echo, out _);
-            throw;
-        }
-        finally
-        {
-            sendLock.Release();
-        }
-
-        string responseText = await waiter.Task.WaitAsync(TimeSpan.FromSeconds(30));
-        return responseText;
+        OneBotClient? client = qchatService?.PrimaryClient;
+        if (client == null)
+            throw new Exception("QQ聊天增强 的连接不可用，请启用 Suran.QChat 并重载角色");
+        // 参数对象可能被多次复用（双动作重试等），必须深拷贝
+        return await client.CallActionRawAsync(action, parameters.DeepClone());
     }
 
     // 解析动作响应：失败（status非ok且retcode非0）抛出带协议端信息的异常
