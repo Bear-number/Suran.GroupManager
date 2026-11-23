@@ -722,24 +722,6 @@ public partial class GroupManagerModule(
         }
     }
 
-    async Task SendGroupTextAsync(long groupId, string text)
-    {
-        JsonObject messageSegment = new()
-        {
-            ["type"] = "text",
-            ["data"] = new JsonObject { ["text"] = text }
-        };
-        JsonArray messageArray = new();
-        messageArray.Add(messageSegment);
-        JsonObject parameters = new()
-        {
-            ["group_id"] = groupId,
-            ["message"] = messageArray
-        };
-        string response = await CallActionAsync("send_group_msg", parameters);
-        ParseActionResponse(response, "发送群消息");
-    }
-
     async Task SendPrivateTextAsync(long userId, string text)
     {
         JsonObject messageSegment = new()
