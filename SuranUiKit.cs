@@ -122,7 +122,7 @@ public static class SuranUiKit
 
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "su-foot");
-        b.AddContent(i++, "改完点下面的保存生效。说明里的数字和「实测」都是当初调出来的结论，改之前值得看一眼。");
+        b.AddContent(i++, "改完点下面的保存生效。说明里的数字都是按实际运行调好的，改之前值得看一眼。");
         b.CloseElement();
 
         b.CloseElement();

@@ -635,7 +635,7 @@ public partial class GroupManagerModule
         [Description("群号")] long groupId,
         [Description("目标QQ号")] long userId,
         [Description("头衔文字，空字符串取消头衔")] string title,
-        [Description("有效天数，-1为永久。注意：NapCat/LLOneBot/SnowLuma 三端实测都忽略该参数，头衔一律长期有效，不要向用户承诺到期时间")] int durationDays = -1,
+        [Description("有效天数，-1为永久。注意：NapCat/LLOneBot/SnowLuma 三端都忽略该参数，头衔一律长期有效，不要向用户承诺到期时间")] int durationDays = -1,
         [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (Gate(Configuration.EnableSpecialTitle, "专属头衔"))
