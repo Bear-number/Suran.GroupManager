@@ -22,7 +22,7 @@ namespace Suran.GroupManager;
 public class GroupManagerConfig
 {
     [DisplayName("运行·功能文档常驻")]
-    [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是主人明确下令时用，默认关")]
+    [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是用户明确下令时用，默认关")]
     public bool DocumentAlwaysResident { get; set; } = false;
 
     // ---- 权限与日志 ----
@@ -137,10 +137,10 @@ public class GroupManagerConfig
     public int JoinPollIntervalMinutes { get; set; } = 10;
 
     [DisplayName("加群·处理模式")]
-    [Description("ask_master=有把握就批拿不准私聊问主人 / auto=Bot全权审批 / notify_only=只私聊通知主人")]
+    [Description("ask_master=有把握就批拿不准私聊问所有者 / auto=Bot全权审批 / notify_only=只私聊通知所有者")]
     public string JoinRequestMode { get; set; } = "ask_master";
 
-    [DisplayName("加群·主人QQ号")]
+    [DisplayName("加群·所有者QQ号")]
     [Description("ask_master与notify_only模式必填")]
     public string MasterQQ { get; set; } = "";
 }
@@ -250,7 +250,8 @@ public partial class GroupManagerModule(
     {
         XmlHandler handler = new(this)
         {
-            Description = "QQ群管理工具集：禁言/解禁/名片/撤回/成员与群资料查询/禁言名单/管理员设置/批量禁言踢人/群名/公告/精华/头衔/加群申请/成员变动与操作日志/询问主人，高危功能与可选功能受配置开关控制。",
+            Description = "管群时用：禁言/解禁、改名片、撤回、查成员与群资料、禁言名单、管理员设置、批量禁言踢人、群名、公告、精华、头衔、加群申请、成员变动与操作日志、询问所有者；"
+                + "高危功能要开关放行。",
             Explanation = "管理操作需要Bot是群管理员。operatorId 填发起操作的用户QQ号（从消息上下文获取），自主决策填 system。可选功能（踢人/全员禁言/公告/精华/头衔/加群申请）默认关闭，需在模块配置中开启。批量操作沿用同一套权限与高危开关；反刷屏默认关闭且默认只观察不操作。"
         };
         functionCaller.RegisterHandler(handler,
@@ -933,7 +934,7 @@ public partial class GroupManagerModule(
             long masterId = ParseQQNumber(Configuration.MasterQQ);
             if (masterId == 0)
             {
-                logger.LogWarning("notify_only 模式未配置主人QQ，无法通知");
+                logger.LogWarning("notify_only 模式未配置所有者QQ，无法通知");
                 return;
             }
             await SendPrivateTextAsync(masterId,
@@ -946,7 +947,7 @@ public partial class GroupManagerModule(
         // ask_master / auto：把申请推给AI，由AI在群内决策
         string modeRule = mode == "auto"
             ? "收到加群申请事件时：根据申请人信息和验证消息自行判断，直接使用 HandleJoinRequest 通过或拒绝（拒绝时给出礼貌的reason）。"
-            : "收到加群申请事件时：你有把握就直接用 HandleJoinRequest 处理；拿不准时先用 AskMaster 私聊询问主人，等主人回复后再决定。";
+            : "收到加群申请事件时：你有把握就直接用 HandleJoinRequest 处理；拿不准时先用 AskMaster 私聊询问所有者，等回复后再决定。";
         interactor.Poke(
             "[系统事件：加群申请]\n"
             + "用户 " + requesterUin + " 申请加入" + groupText + "。\n"

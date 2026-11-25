@@ -748,9 +748,9 @@ public partial class GroupManagerModule
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("拿不准的群管决策（如加群申请、敏感操作）时，私聊询问主人后再决定。需在插件配置中填写主人QQ号")]
+    [Description("拿不准的群管决策（如加群申请、敏感操作）时，私聊询问所有者后再决定。需在插件配置中填写所有者QQ号")]
     public async Task AskMaster(
-        [Description("要问主人的内容，应包含足够背景信息")] string question,
+        [Description("要问所有者的内容，应包含足够背景信息")] string question,
         [Description("发起操作的用户QQ号，自主决策填system")] string operatorId = "system")
     {
         if (GateOperator(operatorId ?? "system"))
@@ -760,18 +760,18 @@ public partial class GroupManagerModule
         long masterId = ParseQQNumber(Configuration.MasterQQ);
         if (masterId == 0)
         {
-            interactor.Poke("❌ 未配置主人QQ，无法询问主人，请自行谨慎判断");
+            interactor.Poke("❌ 未配置所有者QQ，无法询问，请自行谨慎判断");
             return;
         }
         try
         {
             await SendPrivateTextAsync(masterId, "❓ 群管决策请示：\n" + question);
-            LogOperation("询问主人", operatorId ?? "system", Configuration.MasterQQ, "成功");
-            interactor.Poke("✅ 已私聊主人，等待主人回复。在主人回复前，先不要执行该操作。");
+            LogOperation("询问所有者", operatorId ?? "system", Configuration.MasterQQ, "成功");
+            interactor.Poke("✅ 已私聊所有者，等待回复。回复前先不要执行该操作。");
         }
         catch (Exception operationError)
         {
-            interactor.Poke("❌ 询问主人失败: " + operationError.Message);
+            interactor.Poke("❌ 询问所有者失败: " + operationError.Message);
         }
     }
 
