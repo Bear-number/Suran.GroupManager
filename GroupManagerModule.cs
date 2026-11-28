@@ -21,6 +21,8 @@ namespace Suran.GroupManager;
 
 public class GroupManagerConfig
 {
+    /// <summary>界面主题：pink = 粉色（默认），dark = 黑夜。</summary>
+    public string UiTheme { get; set; } = "pink";
     [DisplayName("运行·功能文档常驻")]
     [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是用户明确下令时用，默认关")]
     public bool DocumentAlwaysResident { get; set; } = false;

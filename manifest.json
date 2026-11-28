@@ -1,5 +1,5 @@
-﻿{
-  "Version": "5.2.0",
+{
+  "Version": "5.2.3",
   "Dependencies": {
     "Alife.Function.FunctionCaller": "",
     "Suran.QChat": ""
