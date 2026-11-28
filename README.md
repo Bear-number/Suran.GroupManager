@@ -15,7 +15,7 @@
 
 ## 安装
 
-先装依赖：`Alife.Function.FunctionCaller`。
+先装依赖：`Alife.Function.FunctionCaller`、`Suran.QChat`。
 
 装法二选一：插件市场里搜 `Suran.GroupManager`；或把目录放到 `Storage/Plugins/Suran.GroupManager/`，重启角色生效。
 
@@ -25,9 +25,8 @@
 
 | 设置项 | 键 | 说明 | 默认 |
 | --- | --- | --- | --- |
-| 运行·功能文档常驻 | `DocumentAlwaysResident` | 开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是主人明确下令时用，默认关 | `false` |
-| 基础·协议端地址 | `OneBotWsUrl` | 留空 = 自动跟随「QQ 聊天」插件的配置（推荐）。填了就用这里的，例如 ws://127.0.0.1:3001 | `""` |
-| 基础·访问令牌 | `OneBotToken` | 与协议端配置的 token 一致。留空 = 跟随「QQ 聊天」插件。填了地址却没填这里，协议端一开 token 就会连不上 | `""` |
+| UiTheme | `UiTheme` | 界面主题：pink = 粉色（默认），dark = 黑夜。 | `"pink"` |
+| 运行·功能文档常驻 | `DocumentAlwaysResident` | 开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群管多是用户明确下令时用，默认关 | `false` |
 | 权限·管理员QQ列表 | `AdminList` | 可以用群管功能的QQ号，英文逗号分隔；关闭AI自主执行时只有这些人和系统可以调用 | `""` |
 | 权限·允许AI自主执行 | `AllowAiAutonomous` | 开启后AI自行决定的群管操作直接放行；关闭后仅管理员QQ列表中的用户命令可执行 | `true` |
 | 权限·启动自检Bot管理员身份 | `AutoCheckAdmin` | 启动后检查Bot在各群是否为管理员，不是则写日志提醒 | `true` |
@@ -54,5 +53,5 @@
 | 反刷屏·屏蔽链接 | `AntiSpamBlockLinks` | 开启后消息里出现 http/https/www 等链接即触发，默认关 | `false` |
 | 加群·启用申请处理 | `EnableJoinRequest` | 是否定时轮询待处理的加群申请。 | `false` |
 | 加群·轮询间隔(分钟) | `JoinPollIntervalMinutes` | 纯API查询不消耗AI额度；0为关闭轮询 | `10` |
-| 加群·处理模式 | `JoinRequestMode` | ask_master=有把握就批拿不准私聊问主人 / auto=Bot全权审批 / notify_only=只私聊通知主人 | `"ask_master"` |
-| 加群·主人QQ号 | `MasterQQ` | ask_master与notify_only模式必填 | `""` |
+| 加群·处理模式 | `JoinRequestMode` | ask_master=有把握就批拿不准私聊问所有者 / auto=Bot全权审批 / notify_only=只私聊通知所有者 | `"ask_master"` |
+| 加群·所有者QQ号 | `MasterQQ` | ask_master与notify_only模式必填 | `""` |
